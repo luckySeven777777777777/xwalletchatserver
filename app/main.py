@@ -44,7 +44,7 @@ with SessionLocal() as _migration_db:
         _user.public_id = make_public_user_id(_migration_db)
     _migration_db.commit()
 
-app = FastAPI(title='X-Wallet Chat Management', version='6.2.0')
+app = FastAPI(title='X-Wallet Chat Management', version='6.3.0')
 app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins.split(','), allow_credentials=False, allow_methods=['*'], allow_headers=['*'])
 app.mount('/static', StaticFiles(directory='static'), name='static')
 
@@ -364,12 +364,19 @@ async def admin_sync_telegram_account(account_id: int, db: Session = Depends(get
     if not client or not client.is_connected():
         raise HTTPException(409, 'Telegram account is not connected. Reconnect this account first.')
     try:
-        await tg.sync_dialogs(account_id, client)
+        summary = await tg.sync_dialogs(account_id, client)
     except Exception as exc:
         raise HTTPException(502, f'Telegram sync failed: {exc}')
     count = db.query(Customer).filter_by(account_id=account_id).count()
-    audit(db, actor, 'telegram.account.sync', 'telegram_account', account_id, f'customers={count}')
-    return {'ok': True, 'account_id': account_id, 'customer_count': count}
+    audit(db, actor, 'telegram.account.sync', 'telegram_account', account_id,
+          f"customers={count}; dialogs={summary.get('dialogs_seen', 0)}; messages={summary.get('messages_saved', 0)}; complete={summary.get('complete', False)}")
+    return {'ok': bool(summary.get('complete')), 'account_id': account_id,
+            'customer_count': count, 'dialogs_seen': summary.get('dialogs_seen', 0),
+            'customers_created': summary.get('customers_created', 0),
+            'customers_updated': summary.get('customers_updated', 0),
+            'messages_saved': summary.get('messages_saved', 0),
+            'folders_scanned': summary.get('folders_scanned', []),
+            'warnings': summary.get('warnings', []), 'complete': summary.get('complete', False)}
 
 @app.get('/api/admin/telegram/accounts/{account_id}/profile')
 async def admin_telegram_account_profile(account_id: int, actor: User = Depends(admin)):

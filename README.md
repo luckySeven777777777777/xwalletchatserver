@@ -1,4 +1,4 @@
-# Telegram CRM Management (Railway starter)
+# X-WALLET Chat Management (Railway) — v6.3
 
 A deployable first-stage CRM scaffold for ordinary Telegram user accounts using MTProto, with separate admin/employee logins, assignment-based access, employee-private tags, team-shared tags, persistent message storage, and external social-site shortcuts.
 
@@ -71,6 +71,14 @@ Use two Telegram test accounts, one admin, and two employees:
 - Add websocket push for realtime UI (current UI refreshes on demand).
 - Add assignment quotas and daily reception counters with proper business timezone configuration.
 
+
+## v6.3 repair notes
+- Login tokens are isolated per browser tab with `sessionStorage`, preventing a Chatting/Finding login in another tab from overwriting the Super Admin session. Refresh retains the same tab's role session.
+- Employee login links are checked against the authenticated username; the Super Admin login route rejects non-admin roles.
+- Admin data requests have bounded timeouts and report partial API failures instead of leaving the dashboard indefinitely in a loading state.
+- Telegram sync now returns dialog/customer/message counts and explicit warnings. Sync exceptions are no longer swallowed and presented as success.
+- The selected Telegram account ID is passed explicitly into customer-list loading; the list displays the returned record count and refreshes after sync.
+- Main and archived Telegram dialog folders are scanned where supported. Per-dialog failures are reported; the UI distinguishes a complete sync from a partial sync.
 
 ## v3 repair notes
 - Team list is loaded in the admin panel; new employees can be assigned to a team at creation, and existing users can be moved between teams.

@@ -123,11 +123,12 @@ main section{width:100%;min-width:0}
   </div>
 </div>
 <script>
-let token=localStorage.getItem('crm_token'), me=null, activeCustomer=null, customers=[], pending2FA=null, mediaObjectUrls=[];const $=id=>document.getElementById(id);
+let token=sessionStorage.getItem('crm_token'), me=null, activeCustomer=null, customers=[], pending2FA=null, mediaObjectUrls=[];const $=id=>document.getElementById(id);
 async function api(path,opts={}){
  const method=(opts.method||'GET').toUpperCase(); let r;
- try { r=await fetch('/api'+path,{...opts,headers:{...(opts.body instanceof FormData?{}:{'Content-Type':'application/json'}),...(token?{Authorization:'Bearer '+token}:{}),...(opts.headers||{})}}); }
- catch(e){ throw Error(`网络连接失败：${method} /api${path}。请检查服务是否正常运行。${e.message||''}`); }
+ const controller=new AbortController();const timeoutMs=path.includes('/telegram/accounts/') && path.endsWith('/sync')?300000:20000;const timeout=setTimeout(()=>controller.abort(),timeoutMs);
+ try { r=await fetch('/api'+path,{...opts,signal:controller.signal,headers:{...(opts.body instanceof FormData?{}:{'Content-Type':'application/json'}),...(token?{Authorization:'Bearer '+token}:{}),...(opts.headers||{})}}); }
+ catch(e){ const reason=e.name==='AbortError'?'请求超过时限，已自动停止。':(e.message||'');throw Error(`网络连接失败：${method} /api${path}。${reason} 请检查服务及 Railway 日志。`); } finally {clearTimeout(timeout);}
  const raw=await r.text(); let d={}; try{d=raw?JSON.parse(raw):{};}catch{d={raw};}
  if(!r.ok){let detail=d.detail??d.message??d.raw??r.statusText??'Unknown error';if(typeof detail!=='string')detail=JSON.stringify(detail);throw Error(`${method} /api${path} [HTTP ${r.status}]：${detail}`);}
  return d;
@@ -137,16 +138,26 @@ function setAdminStatus(message,ok=false){const el=$('adminstatus');if(!el)retur
 async function login(){try{
  const d=await api('/auth/login',{method:'POST',body:JSON.stringify({username:$('username').value,password:$('password').value})});
  if(d.requires_2fa){pending2FA=d.challenge_token;$('twofa-step').style.display='block';$('login-2fa-code').focus();$('loginerr').textContent='请输入 Google Authenticator 当前显示的 6 位验证码。';return;}
- token=d.token;localStorage.setItem('crm_token',token);await init();
+ token=d.token;sessionStorage.setItem('crm_token',token);await init();
  }catch(e){$('loginerr').textContent=e.message}}
 async function verifyLogin2FA(){try{
  if(!pending2FA)return;
  const d=await api('/auth/2fa/verify',{method:'POST',body:JSON.stringify({challenge_token:pending2FA,code:$('login-2fa-code').value.trim()})});
- pending2FA=null;token=d.token;localStorage.setItem('crm_token',token);await init();
+ pending2FA=null;token=d.token;sessionStorage.setItem('crm_token',token);await init();
  }catch(e){$('loginerr').textContent=e.message}}
 async function init(){try{
- me=await api('/me');$('login').classList.add('hidden');$('app').classList.remove('hidden');
- const isAdmin=['superadmin','admin'].includes(me.role), isFinding=me.role==='finding';
+ me=await api('/me');
+ // A login URL is bound to the intended identity and role. Never let a token
+ // from another login route turn this page into a different role's workspace.
+ const loginPathMatch=location.pathname.match(/^\/login\/([^/]+)\/?$/);
+ const onAdminLogin=location.pathname==='/superadmin-login';
+ const isAdmin=['superadmin','admin'].includes(me.role);
+ if((loginPathMatch && (decodeURIComponent(loginPathMatch[1])!==me.username || me.role==='superadmin')) || (onAdminLogin && !isAdmin)){
+   sessionStorage.removeItem('crm_token');token=null;me=null;$('app').classList.add('hidden');$('login').classList.remove('hidden');
+   $('loginerr').textContent='此登录链接与当前账号不匹配。请使用该账号专属登录链接。';return;
+ }
+ $('login').classList.add('hidden');$('app').classList.remove('hidden');
+ const isFinding=me.role==='finding';
  $('who').textContent=`${roleLabel(me.role)} · User ID: ${me.public_id||'------'}`;
  $('userpill').innerHTML=`<span>User ID: ${esc(me.public_id||'------')}</span><span>${roleLabel(me.role)}</span>`;
  $('adminnav').classList.toggle('hidden',!isAdmin);
@@ -158,8 +169,8 @@ async function init(){try{
  document.title=isAdmin?'X-WALLET CHAT MANAGEMENT':'X-WALLET CHATTING';
  show('inbox');await renderInbox();
  if(!window.inboxRefreshTimer)window.inboxRefreshTimer=setInterval(()=>{if(token&&!document.hidden&&$('inbox')&&!$('inbox').classList.contains('hidden'))renderInbox()},10000);
- }catch(e){$('loginerr').textContent=e.message;localStorage.removeItem('crm_token');token=null;}}
-function logout(){localStorage.removeItem('crm_token');token=null;location.reload()}
+ }catch(e){$('loginerr').textContent=e.message;sessionStorage.removeItem('crm_token');token=null;}}
+function logout(){sessionStorage.removeItem('crm_token');token=null;location.reload()}
 function show(id){const isAdmin=me&&['superadmin','admin'].includes(me.role);const isFinding=me&&me.role==='finding';if(id==='admin'&&!isAdmin)id='inbox';if(id==='channels'&&!isAdmin&&!isFinding)id='inbox';['inbox','admin','channels'].forEach(x=>$(x).classList.toggle('hidden',x!==id));if(id==='admin')loadAdmin();if(id==='inbox')renderInbox()}
 async function renderInbox(){try{let f=$('filter').value;customers=await api('/inbox?filter='+f);let q=$('search').value.toLowerCase();customers=customers.filter(c=>(c.alias+' '+c.id).toLowerCase().includes(q));$('inboxlist').innerHTML=customers.map(c=>`<div class="item" onclick="openCustomer(${c.id})"><b>${esc(c.alias)}</b><div class="muted">${esc(c.last_message||'')}</div><small class="muted">${c.unread?c.unread+' 未读':''}</small></div>`).join('')||'<p class="muted">暂无已分配客户</p>'}catch(e){showModal('操作失败',e.message,true)}}
 async function renderMessageList(ms){
@@ -247,16 +258,16 @@ async function loadAdmin(){
  if(data['员工账号'])$('users').innerHTML=data['员工账号'].map(u=>`<div class="user-line"><b>${esc(u.username)}</b> · ${roleLabel(u.role)} · ${u.active?'Active':'Disabled'} · User ID ${u.public_id||'------'} · 2FA ${u.totp_enabled?'Enabled':'Not bound'} · Team ${u.team_id??'--'}<div class="user-actions"><button onclick="toggleUser(${u.id},${!u.active})">${u.active?'Disable':'Enable'}</button><button onclick="resetUserPassword(${u.id},'${esc(u.username)}')">Reset Password</button><button onclick="changeUserTeam(${u.id},${u.team_id??'null'})">Change Team</button>${(u.role==='admin'||u.role==='superadmin')&&me.role!=='superadmin'?'':`<button onclick="setupUser2FA(${u.id},'${esc(u.username)}')">${u.totp_enabled?'Rebind 2FA':'Set up 2FA'}</button>`}${me.role==='superadmin' && u.id!==me.id ? `<button class="danger" onclick="resetUser2FA(${u.id},'${esc(u.username)}')">Reset 2FA</button>` : ''}<button onclick="showLoginLink('${esc(u.username)}')">Login Link</button></div></div>`).join('')||'<p class="muted">No employee accounts</p>';
  if(data['Telegram 连接账号']){
   const selector=$('customer-account-filter'), previous=selector.value;
-  selector.innerHTML='<option value="">请选择 Telegram 账号</option>'+data['Telegram 连接账号'].map(a=>`<option value="${a.id}">${esc(a.label)} · Account #${a.id}</option>`).join('');
-  if(previous && data['Telegram 连接账号'].some(a=>String(a.id)===previous))selector.value=previous;
-  else if(data['Telegram 连接账号'].length)selector.value=String(data['Telegram 连接账号'][0].id);
-  await loadAdminCustomers();
+  const accounts=data['Telegram 连接账号'];
+  selector.innerHTML='<option value="">请选择 Telegram 账号</option>'+accounts.map(a=>`<option value="${a.id}">${esc(a.label)} · Account #${a.id}</option>`).join('');
+  const chosen=(previous && accounts.some(a=>String(a.id)===previous))?previous:(accounts.length?String(accounts[0].id):'');
+  selector.value=chosen;
+  if(chosen) await loadAdminCustomers(chosen); else $('customers').innerHTML='<p class="muted">暂无已连接的 Telegram 账号。</p>';
+  $('accounts').innerHTML=accounts.map(a=>`<div class="account-card" id="tg-account-card-${a.id}"><b>Telegram Account #${a.id}</b><div class="telegram-account-profile"><img id="tg-account-avatar-${a.id}" src="/static/logos/telegram.svg" alt="Telegram account avatar"><div class="profile-lines"><b id="tg-account-name-${a.id}">${esc(a.label)}</b><div class="meta" id="tg-account-details-${a.id}">Phone: ${esc(a.phone_masked)} · 正在读取 Telegram 资料…</div></div></div><div class="meta">Status: <span class="account-status ${a.status==='connected'?'':'offline'}">${esc(a.status)}</span><br>Synced customers: <span id="tg-count-${a.id}">${a.customer_count??0}</span><br>Connected: ${formatMyanmar(a.created_at)}</div><div class="account-actions"><button onclick="syncTelegramAccount(${a.id})">Sync all chats</button><button class="secondary" onclick="loadTelegramAccountProfile(${a.id})">Refresh profile</button></div></div>`).join('')||'<p class="muted">No Telegram personal account connected</p>';
+  for(const a of accounts) loadTelegramAccountProfile(a.id);
  }
- if(data['Telegram 连接账号']){
-  $('accounts').innerHTML=data['Telegram 连接账号'].map(a=>`<div class="account-card" id="tg-account-card-${a.id}"><b>Telegram Account #${a.id}</b><div class="telegram-account-profile"><img id="tg-account-avatar-${a.id}" src="/static/logos/telegram.svg" alt="Telegram account avatar"><div class="profile-lines"><b id="tg-account-name-${a.id}">${esc(a.label)}</b><div class="meta" id="tg-account-details-${a.id}">Phone: ${esc(a.phone_masked)} · Loading Telegram profile…</div></div></div><div class="meta">Status: <span class="account-status ${a.status==='connected'?'':'offline'}">${esc(a.status)}</span><br>Synced customers: ${a.customer_count??0}<br>Connected: ${formatMyanmar(a.created_at)}</div><div class="account-actions"><button onclick="syncTelegramAccount(${a.id})">Sync all chats</button><button class="secondary" onclick="loadTelegramAccountProfile(${a.id})">Refresh profile</button></div></div>`).join('')||'<p class="muted">No Telegram personal account connected</p>';
-  for(const a of data['Telegram 连接账号'])loadTelegramAccountProfile(a.id);
- }
- if(errors.length){setAdminStatus('部分管理接口请求失败：\n'+errors.join('\n'));}else if(!data['系统诊断']){setAdminStatus('管理数据已加载，但系统诊断不可用。');}
+ if(errors.length){setAdminStatus('管理后台部分数据读取失败：\n'+errors.join('\n'));}
+ else if(!data['系统诊断']){setAdminStatus('员工、团队和 Telegram 数据已读取；系统诊断接口未返回数据。');}
 }
 async function syncSelectedTelegramAccount(){
  const id=Number($('customer-account-filter')?.value||0);
@@ -269,41 +280,40 @@ async function loadTelegramAccountProfile(id){
   const name=p.name||'Telegram Account';
   $('tg-account-name-'+id).textContent=name;
   $('tg-account-details-'+id).innerHTML=`Username: ${p.username?'@'+esc(p.username):'--'}<br>Phone: ${esc(p.phone||'--')}<br>Telegram ID: ${esc(p.id||'--')}`;
-  if(p.avatar_available){
-   const r=await fetch('/api/admin/telegram/accounts/'+id+'/avatar',{headers:{Authorization:'Bearer '+token}});
-   if(r.ok){const blob=await r.blob();const url=URL.createObjectURL(blob);$('tg-account-avatar-'+id).src=url;}
-  }
- }catch(e){
-  const el=$('tg-account-details-'+id);if(el)el.textContent='Telegram profile unavailable: '+e.message;
- }
+  if(p.avatar_available){const r=await fetch('/api/admin/telegram/accounts/'+id+'/avatar',{headers:{Authorization:'Bearer '+token}});if(r.ok){const blob=await r.blob();const url=URL.createObjectURL(blob);$('tg-account-avatar-'+id).src=url;}}
+ }catch(e){const el=$('tg-account-details-'+id);if(el)el.textContent='Telegram profile unavailable: '+e.message;}
 }
 async function syncTelegramAccount(id){
+ const buttons=Array.from(document.querySelectorAll('button[onclick*="syncTelegramAccount("],button[onclick*="syncSelectedTelegramAccount("]'));
+ buttons.forEach(b=>{b.disabled=true;if(b.textContent.includes('Sync'))b.textContent='Syncing…'});
  try{
   const result=await api('/admin/telegram/accounts/'+id+'/sync',{method:'POST'});
-  showModal('Telegram 同步完成',`Account #${id} 已同步 ${result.customer_count} 个客户。`);
-  await loadAdmin();
- }catch(e){showModal('Telegram 同步失败',e.message,true)}
+  await loadAdminCustomers(String(id));
+  const countEl=$('tg-count-'+id);if(countEl)countEl.textContent=String(result.customer_count??0);
+  showModal(result.complete===false?'Telegram 部分同步完成':'Telegram 同步完成',`账号 #${id}\n扫描会话：${result.dialogs_seen??0}\n客户记录：${result.customer_count??0}\n新增客户：${result.customers_created??0}\n新增聊天消息：${result.messages_saved??0}${result.warnings?.length?'\n\n注意：\n'+result.warnings.join('\n'):''}`,!!result.complete===false);
+ }catch(e){showModal('Telegram 同步失败',e.message+'\n请查看 Railway Deploy Logs；不会再把失败伪装成同步成功。',true);}
+ finally{buttons.forEach(b=>{b.disabled=false;if(b.textContent==='Syncing…')b.textContent='Sync all chats';});}
 }
-async function loadAdminCustomers(){
+async function loadAdminCustomers(accountId=null){
  const selector=$('customer-account-filter');if(!selector)return;
- const account=selector.value;
+ const account=String(accountId||selector.value||'').trim();
  if(!account){$('customers').innerHTML='<p class="muted">请先选择一个 Telegram 连接账号。</p>';return;}
+ selector.value=account;
+ $('customers').innerHTML='<p class="muted">正在读取该 Telegram 账号的客户列表…</p>';
  try{
   const data=await api('/admin/customers?account_id='+encodeURIComponent(account));
+  if(!Array.isArray(data))throw Error('客户接口返回格式错误：预期为客户数组。');
   const employeeChoices=(await api('/admin/users')).filter(u=>u.active && ['employee','chatting','finding'].includes(u.role));
   $('bulk-employee').innerHTML='<option value="">Select employee for bulk assignment</option>'+employeeChoices.map(u=>`<option value="${u.id}">${esc(u.username)} · User ID ${u.public_id||'------'} · ${u.role}</option>`).join('');
-  $('customers').innerHTML=data.map(c=>{
+  $('customers').innerHTML=`<div class="muted" style="margin:8px 0 12px">Account #${esc(account)} · ${data.length} customer(s)</div>`+(data.map(c=>{
    const displayName=c.name||(c.alias && !/^Customer-\d+/i.test(c.alias) && c.alias!=='@'+(c.telegram_username||'')?c.alias:'Telegram User');
    const username=c.telegram_username?'@'+c.telegram_username:'';
-   const assigned=(c.assigned_to||[]).map(a=>`${esc(a.username)} (User ID ${a.user_id})`).join(', ')||'Unassigned';
-   return `<div class="item"><div class="customer-row"><input class="customer-select customer-check" type="checkbox" value="${c.id}" onchange="updateSelectedCount()" aria-label="Select customer"><img id="customer-avatar-${c.id}" class="customer-avatar" alt="Telegram avatar" src="/static/logos/telegram.svg"><div><b>${esc(displayName)}</b> ${username?`· ${esc(username)}`:''}<div class="muted">Phone: ${esc(c.phone||'--')} · Account #${c.account_id}</div><div class="muted">Assigned to: <b>${assigned}</b></div></div></div><div class="assign-actions"><select id="assign-${c.id}"><option value="">Select employee account</option>${employeeChoices.map(u=>`<option value="${u.id}">${esc(u.username)} · User ID ${u.public_id||'------'} · ${u.role}</option>`).join('')}</select><button onclick="assignCustomer(${c.id})">Assign</button><button class="danger" onclick="revokeCustomer(${c.id})">Unassign</button></div></div>`;
-  }).join('')||'<p class="muted">此 Telegram 账号目前没有客户。</p>';
+   const assigned=(c.assigned_to||[]).map(a=>`${esc(a.username)} (User ID ${esc(a.user_id)})`).join(', ')||'Unassigned';
+   return `<div class="item"><div class="customer-row"><input class="customer-select customer-check" type="checkbox" value="${c.id}" onchange="updateSelectedCount()" aria-label="Select customer"><img id="customer-avatar-${c.id}" class="customer-avatar" alt="Telegram avatar" src="/static/logos/telegram.svg"><div><b>${esc(displayName)}</b> ${username?`· ${esc(username)}`:''}<div class="muted">Phone: ${esc(c.phone||'--')} · Telegram ID: ${esc(c.telegram_user_id||'--')} · Account #${c.account_id}</div><div class="muted">Assigned to: <b>${assigned}</b></div></div></div><div class="assign-actions"><select id="assign-${c.id}"><option value="">Select employee account</option>${employeeChoices.map(u=>`<option value="${u.id}">${esc(u.username)} · User ID ${u.public_id||'------'} · ${u.role}</option>`).join('')}</select><button onclick="assignCustomer(${c.id})">Assign</button><button class="danger" onclick="revokeCustomer(${c.id})">Unassign</button></div></div>`;
+  }).join('')||'<p class="muted">此 Telegram 账号目前没有客户记录。请先点击 Sync selected account。</p>');
   $('select-all-customers').checked=false;updateSelectedCount();
-  for(const c of data){if(!c.avatar_available)continue;try{
-   const r=await fetch('/api/admin/customers/'+c.id+'/avatar',{headers:{Authorization:'Bearer '+token}});
-   if(r.ok){const blob=await r.blob(),url=URL.createObjectURL(blob);const img=$('customer-avatar-'+c.id);if(img)img.src=url;}
-  }catch(e){console.warn('avatar preview failed',e)}}
- }catch(e){$('customers').innerHTML='<p class="muted">'+esc(e.message)+'</p>'}
+  for(const c of data){if(!c.avatar_available)continue;try{const r=await fetch('/api/admin/customers/'+c.id+'/avatar',{headers:{Authorization:'Bearer '+token}});if(r.ok){const blob=await r.blob(),url=URL.createObjectURL(blob);const img=$('customer-avatar-'+c.id);if(img)img.src=url;}}catch(e){console.warn('avatar preview failed',e)}}
+ }catch(e){$('customers').innerHTML='<p class="muted">客户列表读取失败：'+esc(e.message)+'</p>';}
 }
 async function toggleUser(id,active){try{await api('/admin/users/'+id+'?active='+active,{method:'PATCH'});await loadAdmin();showModal('账号状态已更新',active?'账号已恢复启用。':'账号已禁用。')}catch(e){showModal('操作失败',e.message,true)}}
 function resetUserPassword(id,username){
@@ -364,6 +374,6 @@ function roleLabel(role){return ({superadmin:'Super Admin',admin:'Administrator'
 function formatMyanmar(value){if(!value)return '--';const d=new Date(value);if(Number.isNaN(d.getTime()))return String(value);return new Intl.DateTimeFormat('en-GB',{timeZone:'Asia/Yangon',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}).format(d)+' (MMT)'}
 $('compose').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send()}});$('password').addEventListener('keydown',e=>{if(e.key==='Enter')login()});$('login-2fa-code').addEventListener('keydown',e=>{if(e.key==='Enter')verifyLogin2FA()});window.addEventListener('focus',()=>{if(token&&$('inbox')&&!$('inbox').classList.contains('hidden'))renderInbox()});
 
-const loginPath=location.pathname.match(/^\/login\/([^/]+)\/?$/);const adminLoginPath=location.pathname==='/superadmin-login';if(adminLoginPath){$('loginbrand').textContent='X-WALLET CHAT MANAGEMENT';document.title='X-WALLET CHAT MANAGEMENT';document.querySelector('#login .muted').textContent='Super Administrator · Secure Management Login'}if(loginPath){localStorage.removeItem('crm_token');token=null;try{$('username').value=decodeURIComponent(loginPath[1]);$('password').focus()}catch{}}
+const loginPath=location.pathname.match(/^\/login\/([^/]+)\/?$/);const adminLoginPath=location.pathname==='/superadmin-login';if(adminLoginPath){$('loginbrand').textContent='X-WALLET CHAT MANAGEMENT';document.title='X-WALLET CHAT MANAGEMENT';document.querySelector('#login .muted').textContent='Super Administrator · Secure Management Login'}if(loginPath){try{$('username').value=decodeURIComponent(loginPath[1]);$('password').focus()}catch{}}
 if(token)init();
 </script></body></html>

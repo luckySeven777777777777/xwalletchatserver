@@ -149,47 +149,112 @@ def attach_handlers(account_id: int, client: TelegramClient):
         except Exception as e: print('telegram incoming handler:', repr(e))
 
 async def sync_dialogs(account_id: int, client: TelegramClient):
+    """Synchronize every Telegram dialog in the main and archived folders.
+
+    Returns a measurable summary. Errors are never silently swallowed: folder or
+    per-dialog failures are reported so the API cannot claim a false success.
+    """
     db = SessionLocal()
+    summary = {
+        'dialogs_seen': 0,
+        'customers_created': 0,
+        'customers_updated': 0,
+        'messages_saved': 0,
+        'folders_scanned': [],
+        'warnings': [],
+    }
     try:
-        # Sync both the main chat list and Archived Chats. Telegram stores these
-        # in separate dialog folders, so reading only the default folder misses clients.
         dialogs_by_peer = {}
         for folder in (0, 1):
             try:
-                folder_dialogs = await client.get_dialogs(limit=None, folder=folder)
-            except TypeError:
-                folder_dialogs = await client.get_dialogs(limit=None)
-                if folder == 1:
-                    break
-            for item in folder_dialogs:
-                dialogs_by_peer[str(item.id)] = item
+                async for item in client.iter_dialogs(limit=None, folder=folder):
+                    dialogs_by_peer[str(item.id)] = item
+                summary['folders_scanned'].append(folder)
+            except TypeError as exc:
+                # Older Telethon builds may not expose folder support. Main chats
+                # remain available, but archived chats must be reported as skipped.
+                if folder == 0:
+                    try:
+                        async for item in client.iter_dialogs(limit=None):
+                            dialogs_by_peer[str(item.id)] = item
+                        summary['folders_scanned'].append(0)
+                    except Exception as fallback_exc:
+                        raise RuntimeError(f'Cannot read Telegram dialogs: {fallback_exc}') from fallback_exc
+                else:
+                    summary['warnings'].append(f'Archived chats could not be enumerated by this Telethon build: {exc}')
+            except Exception as exc:
+                if folder == 0:
+                    raise RuntimeError(f'Cannot read Telegram main chat list: {exc}') from exc
+                summary['warnings'].append(f'Archived chats could not be read: {exc}')
+
+        summary['dialogs_seen'] = len(dialogs_by_peer)
         for dialog in dialogs_by_peer.values():
             entity = dialog.entity
-            if getattr(entity, 'bot', False) or not getattr(entity, 'id', None): continue
+            if getattr(entity, 'bot', False) or not getattr(entity, 'id', None):
+                continue
             peer_id = str(dialog.id)
-            name = ' '.join(filter(None,[getattr(entity,'first_name',''),getattr(entity,'last_name','')])).strip()
-            username = getattr(entity,'username','') or ''
-            customer = db.query(Customer).filter_by(account_id=account_id, telegram_peer_id=peer_id).first()
-            if not customer:
-                customer = Customer(account_id=account_id, telegram_peer_id=peer_id, telegram_access_hash=str(getattr(entity,'access_hash','') or ''), real_username=username, real_name=name, phone=getattr(entity,'phone','') or '', alias=customer_label(entity))
-                db.add(customer); db.commit(); db.refresh(customer)
-            else:
-                customer.real_username=username
-                customer.real_name=name
-                customer.phone=getattr(entity,'phone','') or ''
-                customer.telegram_access_hash=str(getattr(entity,'access_hash','') or customer.telegram_access_hash)
-                customer.alias=customer_label(entity)
-            await save_avatar(account_id, customer, entity)
-            db.commit()
-            async for msg in client.iter_messages(entity, limit=1000, reverse=True):
-                if not msg or not msg.id: continue
-                if db.query(Message).filter_by(customer_id=customer.id, telegram_message_id=str(msg.id)).first(): continue
-                media_path = await save_message_media(account_id, msg, customer.id)
-                db.add(Message(customer_id=customer.id, telegram_message_id=str(msg.id), direction='out' if msg.out else 'in', body=msg.message or '', media_path=os.path.relpath(media_path, upload_root()) if media_path else '', sent_at=msg.date or datetime.now(timezone.utc), sender_label='Agent' if msg.out else 'Customer'))
-                try: db.commit()
-                except IntegrityError: db.rollback()
-    except Exception as e: print('dialog sync:', repr(e))
-    finally: db.close()
+            try:
+                name = ' '.join(filter(None, [getattr(entity, 'first_name', ''), getattr(entity, 'last_name', '')])).strip()
+                username = getattr(entity, 'username', '') or ''
+                customer = db.query(Customer).filter_by(account_id=account_id, telegram_peer_id=peer_id).first()
+                if not customer:
+                    customer = Customer(
+                        account_id=account_id,
+                        telegram_peer_id=peer_id,
+                        telegram_access_hash=str(getattr(entity, 'access_hash', '') or ''),
+                        real_username=username,
+                        real_name=name,
+                        phone=getattr(entity, 'phone', '') or '',
+                        alias=customer_label(entity),
+                    )
+                    db.add(customer)
+                    db.flush()
+                    summary['customers_created'] += 1
+                else:
+                    summary['customers_updated'] += 1
+                    customer.real_username = username
+                    customer.real_name = name
+                    customer.phone = getattr(entity, 'phone', '') or ''
+                    customer.telegram_access_hash = str(getattr(entity, 'access_hash', '') or customer.telegram_access_hash)
+                    customer.alias = customer_label(entity)
+
+                await save_avatar(account_id, customer, entity)
+                db.flush()
+
+                # Load existing Telegram message IDs once per dialog to avoid a
+                # database query for every historical message.
+                existing_ids = {
+                    row[0] for row in db.query(Message.telegram_message_id)
+                    .filter_by(customer_id=customer.id).all()
+                }
+                async for msg in client.iter_messages(entity, limit=1000, reverse=True):
+                    if not msg or not msg.id or str(msg.id) in existing_ids:
+                        continue
+                    media_path = await save_message_media(account_id, msg, customer.id)
+                    db.add(Message(
+                        customer_id=customer.id,
+                        telegram_message_id=str(msg.id),
+                        direction='out' if msg.out else 'in',
+                        body=msg.message or '',
+                        media_path=os.path.relpath(media_path, upload_root()) if media_path else '',
+                        sent_at=msg.date or datetime.now(timezone.utc),
+                        sender_label='Agent' if msg.out else 'Customer',
+                    ))
+                    existing_ids.add(str(msg.id))
+                    summary['messages_saved'] += 1
+                db.commit()
+            except Exception as exc:
+                db.rollback()
+                summary['warnings'].append(f'Dialog {peer_id} ({customer_label(entity)}): {exc}')
+
+        summary['customer_count'] = db.query(Customer).filter_by(account_id=account_id).count()
+        summary['complete'] = not summary['warnings']
+        return summary
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
 
 async def restore_clients():
     db = SessionLocal()
