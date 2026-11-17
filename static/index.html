@@ -75,11 +75,11 @@ main section{width:100%;min-width:0}
 .account-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
 .customer-row{align-items:center}
 .customer-row img{flex:0 0 42px}
-.channel-launch-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px;margin:16px 0}
-.channel-launch-card{border:1px solid rgba(119,157,221,.3);background:rgba(28,36,51,.88);border-radius:13px;padding:16px;display:flex;flex-direction:column;gap:10px;min-width:0}
-.channel-launch-card p{color:#aab6c8;font-size:12px;line-height:1.5;margin:0}
-.channel-launch-card .channel-actions{display:flex;gap:8px;flex-wrap:wrap}
-.channel-launch-card a{color:#b9d5ff;text-decoration:none;font-size:12px}
+.channel-tabs{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}
+.channel-tabs button{min-width:120px}
+.channel-frame-wrap{height:min(76vh,820px);min-height:520px;border:1px solid rgba(119,157,221,.32);border-radius:12px;overflow:hidden;background:#fff}
+.channel-frame{display:block;width:100%;height:100%;border:0;background:#fff}
+.channel-embed-note{margin:10px 0;color:#aab6c8;font-size:12px;line-height:1.55}
 .login-shell{min-height:100vh;width:100%;display:flex;align-items:flex-start;justify-content:center;padding:68px 20px 30px}
 @media(max-width:900px){.layout{grid-template-columns:1fr}.side{display:flex;align-items:center;gap:6px;overflow:auto}.side h2{display:block;min-width:130px}.side button{white-space:nowrap;width:auto}.main{padding:14px}.chatlayout{height:auto;min-height:0;grid-template-columns:1fr}.chatlayout>.list,.chatlayout>.messages,.chatlayout>.profile{height:auto;max-height:42vh;border-right:0;border-bottom:1px solid rgba(119,157,221,.22)}}
 
@@ -112,15 +112,16 @@ body::before,body::after{display:none!important}
 <div class="modal-note">Only record information voluntarily provided by the customer. Leave unknown fields as Not specified.</div></div></div></section>
 <section id="admin" class="hidden"><h1>超级管理员 / 管理后台</h1><div id="adminstatus" class="api-status hidden"></div><div class="grid"><div class="card"><h3>创建员工 / 管理员</h3><input id="newuser" placeholder="用户名"><input id="newpass" type="password" placeholder="初始密码（至少10位）"><select id="newrole"><option value="chatting">Chatting Employee</option><option value="finding">Finding Employee</option><option value="admin">Administrator</option></select><select id="newteam"><option value="">不加入团队</option></select><p class="muted">Employee initial password must be at least 10 characters.</p><button onclick="createUser()">创建账号</button></div><div class="card"><h3>创建团队</h3><input id="teamname" placeholder="团队名称"><button onclick="createTeam()">创建团队</button></div><div class="card"><h3>连接 Telegram 个人账号</h3><input id="phone" placeholder="国际格式手机号，例如 +1... 或 +95..."><button onclick="beginTelegram()">发送验证码</button><input id="codehash" placeholder="验证码挑战（自动填入）"><input id="code" placeholder="Telegram 验证码"><input id="tgpassword" type="password" placeholder="两步验证密码（如有）"><button onclick="completeTelegram()">完成授权</button><p class="muted">验证码只在后端登录流程中使用；Session 加密保存。</p></div><div class="card"><h3>账号与统计</h3><button class="secondary" onclick="loadAdmin()">刷新管理数据</button><pre id="stats" class="muted"></pre><hr><h3>🔐 账号双重验证（2FA）</h3><p class="muted">超级管理员、管理员和员工均可绑定 Google Authenticator。</p><button onclick="open2FASettings()">设置当前账号 2FA</button></div></div><div class="card"><h3>团队管理</h3><div id="teams"><p class="muted">暂无团队</p></div></div><div class="card"><h3>员工账号</h3><div id="users"></div></div><div class="card"><div class="row" style="align-items:center"><h3>Telegram 客户（管理员可见真实资料）</h3><select id="customer-account-filter" class="customer-filter" onchange="loadAdminCustomers()"><option value="">选择 Telegram 账号</option></select><button class="secondary" onclick="syncSelectedTelegramAccount()">Sync selected account</button></div><div class="batch-toolbar"><label style="display:flex;align-items:center;gap:8px;white-space:nowrap"><input id="select-all-customers" class="customer-select" type="checkbox" onchange="toggleAllCustomers(this.checked)"> Select all</label><select id="bulk-employee"><option value="">Select employee for bulk assignment</option></select><button onclick="bulkAssignCustomers()">Assign selected</button><button class="danger" onclick="bulkUnassignCustomers()">Unassign selected</button><span id="selected-customer-count" class="muted">0 selected</span></div><div id="customers"></div></div><div class="card"><h3>Telegram 连接账号</h3><div id="accounts"></div></div></section>
 <section id="channels" class="hidden"><h1>Social Channels</h1>
-<p class="muted">点击“打开桌面应用”会尝试调用电脑已安装的官方应用。浏览器需要允许打开外部应用；若没有安装或系统不支持该协议，请使用官方网页入口或先安装官方桌面客户端。</p>
-<div class="channel-launch-grid">
- <div class="channel-launch-card"><h3>Telegram</h3><p>尝试打开 Telegram Desktop。也可访问 Telegram 官方桌面版。</p><div class="channel-actions"><button onclick="launchDesktopApp('tg://resolve?domain=telegram','Telegram Desktop')">打开桌面应用</button><a href="https://desktop.telegram.org/" target="_blank" rel="noopener">官方桌面版</a></div></div>
- <div class="channel-launch-card"><h3>WhatsApp</h3><p>尝试调用 WhatsApp Desktop。未安装时可使用官方桌面下载页面。</p><div class="channel-actions"><button onclick="launchDesktopApp('whatsapp://','WhatsApp')">打开桌面应用</button><a href="https://www.whatsapp.com/download/" target="_blank" rel="noopener">官方桌面版</a></div></div>
- <div class="channel-launch-card"><h3>Instagram</h3><p>如果电脑已注册 Instagram 应用协议，则尝试打开应用。</p><div class="channel-actions"><button onclick="launchDesktopApp('instagram://app','Instagram')">打开应用</button><a href="https://www.instagram.com/" target="_blank" rel="noopener">官方网页</a></div></div>
- <div class="channel-launch-card"><h3>TikTok</h3><p>TikTok 桌面端没有可在所有 Windows 电脑通用的公开启动协议。</p><div class="channel-actions"><a href="https://www.tiktok.com/" target="_blank" rel="noopener">打开 TikTok 官方网站</a><a href="https://www.microsoft.com/store/search?query=tiktok" target="_blank" rel="noopener">Microsoft Store 搜索</a></div></div>
- <div class="channel-launch-card"><h3>LINE</h3><p>尝试调用 LINE 桌面应用；也可从 LINE 官方网站下载安装。</p><div class="channel-actions"><button onclick="launchDesktopApp('line://','LINE')">打开桌面应用</button><a href="https://line.me/en/download" target="_blank" rel="noopener">官方桌面版</a></div></div>
+<p class="muted">所有平台只尝试在当前工作台内嵌显示，不调用 Windows 桌面应用、不跳转新标签页，也不启动外部程序。</p>
+<div class="channel-tabs">
+ <button type="button" onclick="showChannel('telegram')">Telegram</button>
+ <button type="button" onclick="showChannel('whatsapp')">WhatsApp</button>
+ <button type="button" onclick="showChannel('instagram')">Instagram</button>
+ <button type="button" onclick="showChannel('tiktok')">TikTok</button>
+ <button type="button" onclick="showChannel('line')">LINE</button>
 </div>
-<p class="muted" id="channel-launch-status">提示：网站不能在自身页面内部运行其他公司的桌面程序；Windows 会根据已安装的官方应用和浏览器权限决定是否启动。</p>
+<div class="channel-frame-wrap"><iframe id="channel-frame" class="channel-frame" title="Social platform workspace" sandbox="allow-forms allow-scripts allow-same-origin" referrerpolicy="no-referrer" src="about:blank"></iframe></div>
+<p class="channel-embed-note" id="channel-embed-note">请选择平台。为避免员工离开 CRM，本页面不会打开桌面软件或外部标签页。若平台自身禁止 iframe 嵌入，页面会无法加载；这是平台的安全策略，CRM 无法绕过。</p>
 </section></main></div>
 <div id="appmodal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="modal-title">
   <div class="modal-panel">
@@ -134,15 +135,18 @@ body::before,body::after{display:none!important}
 const currentPath=location.pathname;
 let decodedPath=currentPath;
 try{decodedPath=decodeURIComponent(currentPath)}catch{}
-const employeeRoute=decodedPath.match(/^\/login\/([^/]+)\/?$/);
+const findingRoute=decodedPath.match(/^\/finding\/([^/]+)\/?$/);
+const chattingRoute=decodedPath.match(/^\/login\/([^/]+)\/?$/);
+const employeeRoute=findingRoute||chattingRoute;
 const expectedUsername=employeeRoute?employeeRoute[1]:'';
+const expectedRole=findingRoute?'finding':(chattingRoute?'chatting':'');
 const superadminRoute=decodedPath==='/superadmin-login';
 // A distinct sessionStorage key per employee link, plus a dedicated admin key.
 // sessionStorage survives refresh but is not shared between browser tabs.
-const sessionKey='xwallet_session_v3:'+ (employeeRoute?'employee:'+expectedUsername.toLowerCase():'superadmin');
+const sessionKey='xwallet_session_v4:'+ (employeeRoute?expectedRole+':'+expectedUsername.toLowerCase():'superadmin');
 let token=sessionStorage.getItem(sessionKey), me=null, activeCustomer=null, customers=[], pending2FA=null, mediaObjectUrls=[];
 const $=id=>document.getElementById(id);
-if(expectedUsername){$('username').value=expectedUsername;$('username').readOnly=true;$('loginbrand').textContent='X-WALLET CHATTING';document.title='X-WALLET CHATTING';}
+if(expectedUsername){const routeBrand=expectedRole==='finding'?'X-WALLET FINDING':'X-WALLET CHATTING';$('username').value=expectedUsername;$('username').readOnly=true;$('loginbrand').textContent=routeBrand;document.title=routeBrand;}
 else{$('loginbrand').textContent='X-WALLET CHAT SERVER';document.title='X-WALLET CHAT SERVER';}
 if(superadminRoute){$('loginbrand').textContent='X-WALLET CHAT SERVER';document.querySelector('#login .muted').textContent='Super Administrator · Secure Server Login';}
 
@@ -169,6 +173,7 @@ async function verifyLogin2FA(){try{
 async function init(){try{
  me=await api('/me');
  if(expectedUsername && me.username.toLowerCase()!==expectedUsername.toLowerCase()) throw Error('此登录链接仅属于员工 '+expectedUsername+'，当前会话不匹配，请重新登录。');
+ if(expectedRole && me.role!==expectedRole) throw Error('此登录链接仅适用于 '+(expectedRole==='finding'?'Finding':'Chatting')+' 员工账号。');
  if(superadminRoute && me.role!=='superadmin') throw Error('此入口仅允许超级管理员登录。请使用超级管理员账号。');
  $('login').classList.add('hidden');$('app').classList.remove('hidden');
  const isAdmin=['superadmin','admin'].includes(me.role), isFinding=me.role==='finding';
@@ -178,7 +183,7 @@ async function init(){try{
  $('channelsnav').classList.toggle('hidden',!(isAdmin||isFinding));
  $('who').classList.toggle('hidden',!isAdmin);
  $('securitybtn').classList.toggle('hidden',!isAdmin);
- const appBrand=me.role==='superadmin'?'X-WALLET CHAT SERVER':(me.role==='admin'?'X-WALLET CHAT MANAGEMENT':'X-WALLET CHATTING');
+ const appBrand=me.role==='superadmin'?'X-WALLET CHAT SERVER':(me.role==='admin'?'X-WALLET CHAT MANAGEMENT':(me.role==='finding'?'X-WALLET FINDING':'X-WALLET CHATTING'));
  $('brandname').textContent=appBrand;
  $('loginbrand').textContent=appBrand;
  document.title=appBrand;
@@ -270,7 +275,7 @@ async function loadAdmin(){
   $('teams').innerHTML=teams.map(t=>`<div class="team-row"><b>${esc(t.name)}</b><span class="muted">Team ID: ${t.id}</span></div>`).join('')||'<p class="muted">暂无团队</p>';
   $('newteam').innerHTML='<option value="">不加入团队</option>'+teams.map(t=>`<option value="${t.id}">${esc(t.name)}</option>`).join('');
  }
- if(data['员工账号'])$('users').innerHTML=data['员工账号'].map(u=>`<div class="user-line"><b>${esc(u.username)}</b> · ${roleLabel(u.role)} · ${u.active?'Active':'Disabled'} · User ID ${u.public_id||'------'} · 2FA ${u.totp_enabled?'Enabled':'Not bound'} · Team ${u.team_id??'--'}<div class="user-actions"><button onclick="toggleUser(${u.id},${!u.active})">${u.active?'Disable':'Enable'}</button><button onclick="resetUserPassword(${u.id},'${esc(u.username)}')">Reset Password</button><button onclick="changeUserTeam(${u.id},${u.team_id??'null'})">Change Team</button>${(u.role==='admin'||u.role==='superadmin')&&me.role!=='superadmin'?'':`<button onclick="setupUser2FA(${u.id},'${esc(u.username)}')">${u.totp_enabled?'Rebind 2FA':'Set up 2FA'}</button>`}${me.role==='superadmin' && u.id!==me.id ? `<button class="danger" onclick="resetUser2FA(${u.id},'${esc(u.username)}')">Reset 2FA</button>` : ''}<button onclick="showLoginLink('${esc(u.username)}')">Login Link</button></div></div>`).join('')||'<p class="muted">No employee accounts</p>';
+ if(data['员工账号'])$('users').innerHTML=data['员工账号'].map(u=>`<div class="user-line"><b>${esc(u.username)}</b> · ${roleLabel(u.role)} · ${u.active?'Active':'Disabled'} · User ID ${u.public_id||'------'} · 2FA ${u.totp_enabled?'Enabled':'Not bound'} · Team ${u.team_id??'--'}<div class="user-actions"><button onclick="toggleUser(${u.id},${!u.active})">${u.active?'Disable':'Enable'}</button><button onclick="resetUserPassword(${u.id},'${esc(u.username)}')">Reset Password</button><button onclick="changeUserTeam(${u.id},${u.team_id??'null'})">Change Team</button>${(u.role==='admin'||u.role==='superadmin')&&me.role!=='superadmin'?'':`<button onclick="setupUser2FA(${u.id},'${esc(u.username)}')">${u.totp_enabled?'Rebind 2FA':'Set up 2FA'}</button>`}${me.role==='superadmin' && u.id!==me.id ? `<button class="danger" onclick="resetUser2FA(${u.id},'${esc(u.username)}')">Reset 2FA</button>` : ''}<button onclick="showLoginLink('${esc(u.username)}','${esc(u.role)}')">Login Link</button></div></div>`).join('')||'<p class="muted">No employee accounts</p>';
  if(data['Telegram 连接账号']){
   const selector=$('customer-account-filter'), previous=selector.value;
   selector.innerHTML='<option value="">请选择 Telegram 账号</option>'+data['Telegram 连接账号'].map(a=>`<option value="${a.id}">${esc(a.label)} · Account #${a.id}</option>`).join('');
@@ -343,7 +348,7 @@ async function changeUserTeam(id,current){
   $('modal-confirm').textContent='保存';$('modal-confirm').onclick=async()=>{const v=$('modal-team-select').value;try{await api('/admin/users/'+id+'/team',{method:'PATCH',body:JSON.stringify({team_id:v?Number(v):null})});await loadAdmin();showModal('团队已更新','员工团队归属已更新。')}catch(e){showModal('操作失败',e.message,true)}};
  }catch(e){showModal('读取团队失败',e.message,true)}
 }
-async function showLoginLink(username){const path='/login/'+encodeURIComponent(username);let base='';try{base=(await api('/admin/app-url')).base_url||''}catch{}const url=base+path;showModal('Employee Login Link',`Account: ${username}`,false,`<div class="modal-linkrow"><input id="created-login-url" readonly value="${esc(url)}"><button onclick="copyCreatedLink()">Copy link</button></div><div class="modal-note">${base?'This link uses your configured branded domain.':'Set APP_BASE_URL to your own domain in hosting variables to create a full link without showing the hosting provider domain.'}</div>`)}
+async function showLoginLink(username,role='chatting'){const path=(role==='finding'?'/finding/':'/login/')+encodeURIComponent(username);let base='';try{base=(await api('/admin/app-url')).base_url||''}catch{}const url=base+path;showModal('Employee Login Link',`Account: ${username}`,false,`<div class="modal-linkrow"><input id="created-login-url" readonly value="${esc(url)}"><button onclick="copyCreatedLink()">Copy link</button></div><div class="modal-note">${base?'This link uses your configured branded domain.':'Set APP_BASE_URL to your own domain in hosting variables to create a full link without showing the hosting provider domain.'}</div>`)}
 function selectedCustomerIds(){return Array.from(document.querySelectorAll('.customer-check:checked')).map(el=>Number(el.value)).filter(Number.isFinite)}
 function updateSelectedCount(){const n=selectedCustomerIds().length;const count=$('selected-customer-count');if(count)count.textContent=n+' selected';const all=Array.from(document.querySelectorAll('.customer-check'));if($('select-all-customers'))$('select-all-customers').checked=all.length>0&&n===all.length;}
 function toggleAllCustomers(checked){document.querySelectorAll('.customer-check').forEach(el=>el.checked=checked);updateSelectedCount()}
@@ -380,9 +385,20 @@ async function open2FASettings(){
   $('modal-confirm').onclick=async()=>{try{await api('/security/2fa/confirm',{method:'POST',body:JSON.stringify({code:$('confirm-2fa-code').value.trim()})});showModal('2FA 绑定成功','从下一次登录开始，必须输入 Google Authenticator 的 6 位动态验证码。')}catch(e){showModal('绑定失败',e.message,true)}};
  }catch(e){showModal('2FA 设置失败',e.message,true)}
 }
-function launchDesktopApp(uri,title){
- $('channel-launch-status').textContent='正在请求 Windows 打开 '+title+'。如果浏览器弹出确认，请选择“打开”；如果没有启动，请安装官方桌面应用或使用官方网页入口。';
- try{window.location.href=uri;}catch(e){$('channel-launch-status').textContent='无法调用 '+title+' 桌面应用，请使用旁边的官方安装入口。'}
+const channelUrls={
+ telegram:{name:'Telegram',url:'https://web.telegram.org/'},
+ whatsapp:{name:'WhatsApp',url:'https://web.whatsapp.com/'},
+ instagram:{name:'Instagram',url:'https://www.instagram.com/'},
+ tiktok:{name:'TikTok',url:'https://www.tiktok.com/'},
+ line:{name:'LINE',url:'https://line.me/' }
+};
+function showChannel(key){
+ const item=channelUrls[key];if(!item)return;
+ const frame=$('channel-frame');
+ // Only navigate the sandboxed, cross-origin iframe. Never invoke custom URI schemes,
+ // window.open, target=_blank, or top-level navigation from this workspace.
+ frame.src=item.url;
+ $('channel-embed-note').textContent=item.name+' 正在当前工作台内加载。若一直空白或显示拒绝连接，说明该平台禁止被第三方 iframe 嵌入；为遵守“只在系统内显示”的要求，不会自动跳转桌面程序或外部浏览器。';
 }
 function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 

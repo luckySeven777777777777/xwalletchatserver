@@ -45,7 +45,7 @@ with SessionLocal() as _migration_db:
         _user.public_id = make_public_user_id(_migration_db)
     _migration_db.commit()
 
-app = FastAPI(title='X-Wallet Chat Management', version='7.4.0')
+app = FastAPI(title='X-Wallet Chat Management', version='7.5.0')
 app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins.split(','), allow_credentials=False, allow_methods=['*'], allow_headers=['*'])
 app.mount('/static', StaticFiles(directory='static'), name='static')
 
@@ -104,7 +104,12 @@ def superadmin_login_page(): return FileResponse('static/index.html')
 
 @app.get('/login/{username}')
 def employee_login_link(username: str):
-    # A distinct employee login URL; it pre-fills the username but never grants access by itself.
+    # Chatting employee link; username is prefilled but never grants access by itself.
+    return FileResponse('static/index.html')
+
+@app.get('/finding/{username}')
+def finding_login_link(username: str):
+    # Finding employee link uses a distinct route and brand, but still requires credentials.
     return FileResponse('static/index.html')
 
 @app.post('/api/auth/login')
@@ -339,7 +344,8 @@ def create_user(data: UserIn, request: Request, db: Session = Depends(get_db), a
     audit(db, actor, 'user.create', 'user', u.id)
     from urllib.parse import quote
     base_url = (settings.app_base_url or 'https://xwalletchatserver-production.up.railway.app').rstrip('/')
-    login_url = base_url + '/login/' + quote(u.username, safe='')
+    login_path = ('/finding/' if u.role == 'finding' else '/login/') + quote(u.username, safe='')
+    login_url = base_url + login_path
     return {'id': u.id, 'public_id': u.public_id, 'username': u.username,
             'role': u.role, 'login_url': login_url, 'needs_custom_domain': False}
 
