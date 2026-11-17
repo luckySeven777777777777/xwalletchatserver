@@ -6,7 +6,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
-from sqlalchemy import desc
+from sqlalchemy import desc, text
 from .db import Base, engine, get_db, SessionLocal
 from .models import User, Team, TgAccount, Customer, Assignment, Message, Tag, AuditLog, ReadState
 from .security import hash_password, verify_password, create_token, decode_token
@@ -259,3 +259,27 @@ def audit_logs(limit:int=100,db:Session=Depends(get_db),actor:User=Depends(admin
 
 @app.get('/api/health')
 def health(): return {'ok':True,'service':'telegram-crm'}
+
+@app.get('/api/health/ready')
+def readiness(db: Session = Depends(get_db)):
+    try:
+        db.execute(text('SELECT 1'))
+    except Exception as exc:
+        raise HTTPException(503, f'Database is not ready: {type(exc).__name__}')
+    return {'ok': True, 'database': 'connected'}
+
+@app.get('/api/admin/diagnostics')
+def diagnostics(db: Session = Depends(get_db), actor: User = Depends(admin)):
+    try:
+        db.execute(text('SELECT 1'))
+        database_status = 'connected'
+    except Exception as exc:
+        database_status = f'error: {type(exc).__name__}'
+    accounts = db.query(TgAccount).all() if database_status == 'connected' else []
+    return {
+        'database': database_status,
+        'telegram_api_configured': bool(settings.telegram_api_id and settings.telegram_api_hash),
+        'session_encryption_configured': bool(settings.session_encryption_key),
+        'telegram_accounts_total': len(accounts),
+        'telegram_accounts_connected': len([a for a in accounts if a.status == 'connected']),
+    }

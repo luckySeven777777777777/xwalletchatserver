@@ -33,6 +33,14 @@ Do not paste API HASH, phone login codes, Telegram passwords, or StringSession i
 - Reassignment revokes previous active assignment and grants new employee access to the same stored history. Revoke does not delete messages.
 - Employee logout does not delete assignments or history.
 
+## UI branding and diagnostics
+
+- Admin sidebar brand: `X-WALLET CHAT MANAGEMENT`.
+- Employee sidebar and login brand: `X-WALLET SERVER`.
+- Social Channels uses recognizable brand marks for Telegram, WhatsApp, Instagram, TikTok and LINE (loaded from Simple Icons CDN).
+- Admin data loading reports the failing API path and HTTP status instead of showing only a generic `Request failed` alert.
+- `GET /api/health/ready` performs a database readiness check; authenticated admins can use `GET /api/admin/diagnostics` to check database and Telegram configuration presence without exposing secrets.
+
 ## Automated checks
 
 Run `pytest -q` after installing requirements. Also run `python -m compileall app`.
