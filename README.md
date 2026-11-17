@@ -91,3 +91,17 @@ Use two Telegram test accounts, one admin, and two employees:
 - Expanded Telegram account cards for admins and superadmins with account ID, label, masked phone, status, customer count, and connection time. Encrypted Telegram sessions are never exposed.
 - Fixed timezone-aware/naive datetime handling in the admin statistics endpoint.
 - Employee login links use `APP_BASE_URL` (or `PUBLIC_APP_URL`) when configured. Set this to a custom domain you own and have connected to the hosting service to avoid exposing the hosting-provider hostname. Without it, the UI shows a relative `/login/<username>` path.
+
+
+## v5 follow-up fixes
+- Added a permanent, unique six-digit `public_id` for every user account. Existing users are backfilled at startup; internal database IDs and assignment foreign keys remain unchanged.
+- `/api/me`, login responses, and administrator user lists now include the public ID. The signed-in header displays `User ID: 637368` without a `#` prefix or username chip.
+- Employee creation and login-link dialogs use the Railway URL `https://xwalletchatserver-production.up.railway.app` by default for direct testing. `APP_BASE_URL` can still override it if needed.
+- Added the `Current Job Title / Occupation` text field directly below `Currently Working`, saved as shared customer profile information.
+- Fixed action-row spacing so account buttons have visible gaps and do not touch or overlap.
+
+
+## v5 testing URL and public ID details
+- The employee login URL is intentionally set to the Railway host shown in the supplied screenshots: `https://xwalletchatserver-production.up.railway.app/login/<username>`.
+- Public account IDs are six-digit random values stored in `users.public_id`; they remain stable on subsequent logins and are backfilled for existing accounts on application startup.
+- Internal numeric user primary keys are retained only for database relations and API operations.

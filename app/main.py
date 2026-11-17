@@ -1,4 +1,4 @@
-import asyncio, re
+import asyncio, re, secrets
 from datetime import datetime, timezone
 from fastapi import FastAPI, Depends, HTTPException, Header, UploadFile, File, Request
 from fastapi.responses import FileResponse
@@ -14,6 +14,27 @@ from .config import settings
 from . import telegram_service as tg
 
 Base.metadata.create_all(bind=engine)
+
+# Backward-compatible migration: add stable public six-digit account IDs without
+# changing the internal primary keys used by assignments and foreign keys.
+with engine.begin() as conn:
+    columns = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(users)").fetchall()} if engine.dialect.name == "sqlite" else {row[0] for row in conn.exec_driver_sql("SELECT column_name FROM information_schema.columns WHERE table_name='users'").fetchall()}
+    if "public_id" not in columns:
+        conn.exec_driver_sql("ALTER TABLE users ADD COLUMN public_id VARCHAR(6)")
+    conn.exec_driver_sql("CREATE UNIQUE INDEX IF NOT EXISTS ix_users_public_id ON users (public_id)")
+
+def make_public_user_id(db):
+    for _ in range(200):
+        candidate = str(secrets.randbelow(900000) + 100000)
+        if not db.query(User).filter_by(public_id=candidate).first():
+            return candidate
+    raise RuntimeError("Could not allocate a unique six-digit public user ID")
+
+with SessionLocal() as _migration_db:
+    for _user in _migration_db.query(User).filter(User.public_id.is_(None)).all():
+        _user.public_id = make_public_user_id(_migration_db)
+    _migration_db.commit()
+
 app = FastAPI(title='Telegram CRM Management', version='1.0.0')
 app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins.split(','), allow_credentials=False, allow_methods=['*'], allow_headers=['*'])
 app.mount('/static', StaticFiles(directory='static'), name='static')
@@ -33,7 +54,7 @@ async def startup():
     db = SessionLocal()
     try:
         if settings.admin_password and not db.query(User).filter_by(username=settings.admin_username).first():
-            db.add(User(username=settings.admin_username, password_hash=hash_password(settings.admin_password), role='superadmin', active=True)); db.commit()
+            db.add(User(username=settings.admin_username, public_id=make_public_user_id(db), password_hash=hash_password(settings.admin_password), role='superadmin', active=True)); db.commit()
     finally: db.close()
     if settings.telegram_api_id and settings.telegram_api_hash and settings.session_encryption_key:
         asyncio.create_task(tg.restore_clients())
@@ -51,7 +72,7 @@ def login(data: LoginIn, db: Session = Depends(get_db)):
     user = db.query(User).filter_by(username=data.username).first()
     if not user or not user.active or not verify_password(data.password, user.password_hash): raise HTTPException(401, 'Invalid username or password')
     user.last_seen = datetime.now(timezone.utc); db.commit()
-    return {'token': create_token(user.id,user.role), 'user': {'id':user.id,'username':user.username,'role':user.role,'team_id':user.team_id}}
+    return {'token': create_token(user.id,user.role), 'user': {'id':user.id,'public_id':user.public_id,'username':user.username,'role':user.role,'team_id':user.team_id}}
 
 def current_user(authorization: str | None = Header(default=None), db: Session = Depends(get_db)):
     if not authorization or not authorization.startswith('Bearer '): raise HTTPException(401,'Login required')
@@ -83,18 +104,18 @@ def redact(text: str):
 
 @app.get('/api/me')
 def me(user: User = Depends(current_user)):
-    return {'id':user.id,'username':user.username,'role':user.role,'team_id':user.team_id}
+    return {'id':user.id,'public_id':user.public_id,'username':user.username,'role':user.role,'team_id':user.team_id}
 
 @app.get('/api/admin/users')
 def list_users(db: Session = Depends(get_db), actor: User = Depends(admin)):
-    return [{'id':u.id,'username':u.username,'role':u.role,'team_id':u.team_id,'active':u.active,'created_at':u.created_at.isoformat(),'last_seen':u.last_seen.isoformat() if u.last_seen else None} for u in db.query(User).order_by(User.id).all()]
+    return [{'id':u.id,'public_id':u.public_id,'username':u.username,'role':u.role,'team_id':u.team_id,'active':u.active,'created_at':u.created_at.isoformat(),'last_seen':u.last_seen.isoformat() if u.last_seen else None} for u in db.query(User).order_by(User.id).all()]
 
 @app.post('/api/admin/users')
 def create_user(data: UserIn, request: Request, db: Session = Depends(get_db), actor: User = Depends(admin)):
     if data.role not in ('admin','employee','chatting','finding'): raise HTTPException(400,'Role must be admin, Chatting, or Finding')
     if db.query(User).filter_by(username=data.username).first(): raise HTTPException(409,'Username already exists')
     if data.team_id and not db.get(Team,data.team_id): raise HTTPException(404,'Team not found')
-    u=User(username=data.username,password_hash=hash_password(data.password),role=data.role,team_id=data.team_id); db.add(u); db.commit(); db.refresh(u); audit(db,actor,'user.create','user',u.id); base=settings.app_base_url.rstrip('/') if settings.app_base_url else ''; login_url=(base + '/login/' + u.username) if base else ('/login/' + u.username); return {'id':u.id,'username':u.username,'role':u.role,'login_url':login_url,'needs_custom_domain':not bool(base)}
+    u=User(username=data.username,public_id=make_public_user_id(db),password_hash=hash_password(data.password),role=data.role,team_id=data.team_id); db.add(u); db.commit(); db.refresh(u); audit(db,actor,'user.create','user',u.id); base='https://xwalletchatserver-production.up.railway.app'; login_url=(base + '/login/' + u.username) if base else ('/login/' + u.username); return {'id':u.id,'public_id':u.public_id,'username':u.username,'role':u.role,'login_url':login_url,'needs_custom_domain':False}
 
 @app.patch('/api/admin/users/{uid}')
 def update_user(uid:int, active:bool, db:Session=Depends(get_db), actor:User=Depends(admin)):
@@ -155,7 +176,7 @@ async def telegram_complete(data:CodeIn, db:Session=Depends(get_db), actor:User=
 
 @app.get('/api/admin/app-url')
 def admin_app_url(actor: User = Depends(admin)):
-    return {'base_url': settings.app_base_url.rstrip('/') if settings.app_base_url else ''}
+    return {'base_url': 'https://xwalletchatserver-production.up.railway.app'}
 
 @app.get('/api/admin/telegram/accounts')
 def telegram_accounts(db:Session=Depends(get_db), actor:User=Depends(admin)):
@@ -163,7 +184,7 @@ def telegram_accounts(db:Session=Depends(get_db), actor:User=Depends(admin)):
 
 @app.get('/api/admin/customers')
 def admin_customers(db:Session=Depends(get_db), actor:User=Depends(admin)):
-    return [{'id':c.id,'alias':c.alias,'telegram_username':c.real_username,'telegram_user_id':c.telegram_peer_id,'name':c.real_name,'phone':c.phone,'account_id':c.account_id,'assigned_to':[{'user_id':a.user_id,'username':db.get(User,a.user_id).username if db.get(User,a.user_id) else 'Unknown'} for a in db.query(Assignment).filter_by(customer_id=c.id,active=True).all()]} for c in db.query(Customer).all()]
+    return [{'id':c.id,'alias':c.alias,'telegram_username':c.real_username,'telegram_user_id':c.telegram_peer_id,'name':c.real_name,'phone':c.phone,'account_id':c.account_id,'assigned_to':[{'user_id':db.get(User,a.user_id).public_id if db.get(User,a.user_id) else None,'username':db.get(User,a.user_id).username if db.get(User,a.user_id) else 'Unknown'} for a in db.query(Assignment).filter_by(customer_id=c.id,active=True).all()]} for c in db.query(Customer).all()]
 
 @app.post('/api/admin/assign')
 def assign(data:AssignIn, db:Session=Depends(get_db), actor:User=Depends(admin)):
@@ -172,7 +193,7 @@ def assign(data:AssignIn, db:Session=Depends(get_db), actor:User=Depends(admin))
     # Reassignment revokes old active assignments but never deletes history/messages/tags.
     old=db.query(Assignment).filter_by(customer_id=c.id,active=True).all()
     for a in old: a.active=False; a.revoked_at=datetime.now(timezone.utc)
-    assignment=Assignment(customer_id=c.id,user_id=u.id,assigned_by=actor.id,active=True); db.add(assignment); db.commit(); audit(db,actor,'customer.assign','customer',c.id,f'to_user={u.id}'); return {'ok':True,'history_preserved':True,'customer_id':c.id,'user_id':u.id,'username':u.username,'assignment_id':assignment.id}
+    assignment=Assignment(customer_id=c.id,user_id=u.id,assigned_by=actor.id,active=True); db.add(assignment); db.commit(); audit(db,actor,'customer.assign','customer',c.id,f'to_user={u.id}'); return {'ok':True,'history_preserved':True,'customer_id':c.id,'user_id':u.id,'public_user_id':u.public_id,'username':u.username,'assignment_id':assignment.id}
 
 @app.post('/api/admin/assign/bulk')
 def bulk_assign(data:BulkAssignIn, db:Session=Depends(get_db), actor:User=Depends(admin)):

@@ -12,9 +12,11 @@ button:hover{filter:brightness(1.1)}button:active{transform:translateY(1px)}
 button.secondary{background:#3478f6;color:#fff}
 button.danger{background:#b83a45}
 .side button{margin:10px 0;padding:12px 14px}
-.item .user-actions,.item .assign-actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:12px;align-items:center}
-.item .user-actions button,.item .assign-actions button{margin:0;min-width:105px}
-.item .user-actions select,.item .assign-actions select{flex:1;min-width:180px;width:auto;margin:0}
+.item .user-actions,.item .assign-actions,.user-line .user-actions,.user-actions,.assign-actions{display:flex;flex-wrap:wrap;gap:12px;margin-top:14px;align-items:center;width:100%}
+.user-line .user-actions{padding-top:3px}
+.user-line .user-actions button,.user-actions button,.assign-actions button{margin:0 2px 3px 0;flex:0 0 auto;border-radius:9px}
+.item .user-actions button,.item .assign-actions button{margin:0 2px 3px 0;min-width:105px}
+.item .user-actions select,.item .assign-actions select{flex:1;min-width:180px;width:auto;margin:0 2px 3px 0}
 .user-pill{display:flex;justify-content:flex-end;align-items:center;gap:10px;margin:0 0 12px;color:#dce7ff}
 .user-pill span{background:#1d2e4c;border:1px solid #315a91;padding:8px 13px;border-radius:999px;font-size:13px}
 .main-top{display:flex;justify-content:flex-end;align-items:center;min-height:36px}
@@ -25,7 +27,7 @@ button.danger{background:#b83a45}
 .account-card .meta{color:#aebbd0;font-size:13px;line-height:1.8}
 .account-status{display:inline-block;border-radius:999px;padding:4px 9px;background:#173d2c;color:#75e0ad;font-size:12px}
 .account-status.offline{background:#48252a;color:#ff9a9f}
-.user-line{padding:14px 0;border-bottom:1px solid #34383f}
+.user-line{padding:16px 0 20px;border-bottom:1px solid #34383f}
 .chatlayout{grid-template-columns:270px minmax(400px,1fr) 270px;gap:14px}
 .list,.messages,.profile{padding:14px}
 #compose{margin:10px 0 8px;min-height:76px}
@@ -35,7 +37,7 @@ button.danger{background:#b83a45}
 <div class="profile-field"><label>Nickname</label><input id="profile-nickname" placeholder="Customer nickname"></div>
 <div class="profile-field"><label>Age</label><input id="profile-age" type="number" min="18" max="120" placeholder="Age"></div>
 <div class="profile-field"><label>Retired</label><select id="profile-retired"><option value="">Not specified</option><option>Yes</option><option>No</option></select></div>
-<div class="profile-field"><label>Currently Working</label><select id="profile-working"><option value="">Not specified</option><option>Yes</option><option>No</option></select></div>
+<div class="profile-field"><label>Currently Working</label><select id="profile-working"><option value="">Not specified</option><option>Yes</option><option>No</option></select></div><div class="profile-field"><label>Current Job Title / Occupation</label><input id="profile-job" placeholder="Customer’s actual job or occupation"></div>
 <div class="profile-field"><label>Marital Status</label><select id="profile-single"><option value="">Not specified</option><option>Single</option><option>Married</option><option>Divorced</option><option>Widowed</option><option>Prefer not to say</option></select></div>
 <div class="profile-field"><label>Living Alone</label><select id="profile-alone"><option value="">Not specified</option><option>Yes</option><option>No</option></select></div>
 <div class="profile-field"><label>Location</label><input id="profile-location" placeholder="City, State / Country"></div>
@@ -73,8 +75,8 @@ async function login(){try{let d=await api('/auth/login',{method:'POST',body:JSO
 async function init(){try{
  me=await api('/me');$('login').classList.add('hidden');$('app').classList.remove('hidden');
  const isAdmin=['superadmin','admin'].includes(me.role), isFinding=me.role==='finding';
- $('who').textContent=`${me.username} · ${roleLabel(me.role)} · ID ${me.id}`;
- $('userpill').innerHTML=`<span>${esc(me.username)}</span><span>User ID: #${me.id}</span><span>${roleLabel(me.role)}</span>`;
+ $('who').textContent=`${roleLabel(me.role)} · User ID: ${me.public_id||'------'}`;
+ $('userpill').innerHTML=`<span>User ID: ${esc(me.public_id||'------')}</span><span>${roleLabel(me.role)}</span>`;
  $('adminnav').classList.toggle('hidden',!isAdmin);
  $('channelsnav').classList.toggle('hidden',!(isAdmin||isFinding));
  $('brandname').textContent=isAdmin?'X-WALLET CHAT MANAGEMENT':'X-WALLET SERVER';
@@ -87,7 +89,7 @@ function show(id){const isAdmin=me&&['superadmin','admin'].includes(me.role);con
 async function renderInbox(){try{let f=$('filter').value;customers=await api('/inbox?filter='+f);let q=$('search').value.toLowerCase();customers=customers.filter(c=>(c.alias+' '+c.id).toLowerCase().includes(q));$('inboxlist').innerHTML=customers.map(c=>`<div class="item" onclick="openCustomer(${c.id})"><b>${esc(c.alias)}</b><div class="muted">${esc(c.last_message||'')}</div><small class="muted">${c.unread?c.unread+' 未读':''}</small></div>`).join('')||'<p class="muted">暂无已分配客户</p>'}catch(e){showModal('操作失败',e.message,true)}}
 async function openCustomer(id){activeCustomer=id;let c=customers.find(x=>x.id===id);$('chathead').textContent=c?.alias||('Customer '+id);let ms=await api('/customers/'+id+'/messages');$('messages').innerHTML=ms.map(m=>`<div class="bubble ${m.direction==='out'?'out':''}"><div>${esc(m.text||'[Media message]')}</div><small class="muted">${formatMyanmar(m.sent_at)}</small></div>`).join('');$('messages').scrollTop=$('messages').scrollHeight;await api('/customers/'+id+'/read',{method:'POST'});await loadTags()}
 async function send(){if(!activeCustomer)return;let text=$('compose').value.trim();if(!text)return;try{await api('/customers/'+activeCustomer+'/send',{method:'POST',body:JSON.stringify({text})});$('compose').value='';await openCustomer(activeCustomer);await renderInbox()}catch(e){showModal('Send failed',e.message,true)}}
-const profileFields={'Nickname':'profile-nickname','Age':'profile-age','Retired':'profile-retired','Currently Working':'profile-working','Marital Status':'profile-single','Living Alone':'profile-alone','Location':'profile-location'};
+const profileFields={'Nickname':'profile-nickname','Age':'profile-age','Retired':'profile-retired','Currently Working':'profile-working','Current Job Title / Occupation':'profile-job','Marital Status':'profile-single','Living Alone':'profile-alone','Location':'profile-location'};
 async function loadTags(){let tags=await api('/customers/'+activeCustomer+'/tags');const byKey={};tags.forEach(t=>byKey[t.key]=t);Object.entries(profileFields).forEach(([key,id])=>{const el=$(id);if(el)el.value=byKey[key]?.value||'';});$('tags').innerHTML=tags.filter(t=>!profileFields[t.key]).map(t=>`<div class="card"><b>${esc(t.key)}</b>: ${esc(t.value)}</div>`).join('')}
 async function saveCustomerProfile(){if(!activeCustomer)return showModal('Select a customer','Choose a customer from the chat list first.',true);try{for(const [key,id] of Object.entries(profileFields)){const value=$(id).value.trim();await api('/customers/'+activeCustomer+'/tags',{method:'POST',body:JSON.stringify({key,value,scope:'shared'})});}await loadTags();showModal('Customer profile saved','The profile is saved as shared customer information and will be visible to authorized employees assigned to this customer.')}catch(e){showModal('Save failed',e.message,true)}}
 async function deleteTag(id){try{await api('/tags/'+id,{method:'DELETE'});await loadTags()}catch(e){showModal('Delete failed',e.message,true)}}
@@ -129,12 +131,12 @@ async function loadAdmin(){
   $('teams').innerHTML=teams.map(t=>`<div class="team-row"><b>${esc(t.name)}</b><span class="muted">Team ID: ${t.id}</span></div>`).join('')||'<p class="muted">暂无团队</p>';
   $('newteam').innerHTML='<option value="">不加入团队</option>'+teams.map(t=>`<option value="${t.id}">${esc(t.name)}</option>`).join('');
  }
- if(data['员工账号'])$('users').innerHTML=data['员工账号'].map(u=>`<div class="user-line"><b>${esc(u.username)}</b> · ${roleLabel(u.role)} · ${u.active?'Active':'Disabled'} · User ID ${u.id} · Team ${u.team_id??'--'}<div class="user-actions"><button onclick="toggleUser(${u.id},${!u.active})">${u.active?'Disable':'Enable'}</button><button onclick="resetUserPassword(${u.id},'${esc(u.username)}')">Reset Password</button><button onclick="changeUserTeam(${u.id},${u.team_id??'null'})">Change Team</button><button onclick="showLoginLink('${esc(u.username)}')">Login Link</button></div></div>`).join('')||'<p class="muted">No employee accounts</p>';
+ if(data['员工账号'])$('users').innerHTML=data['员工账号'].map(u=>`<div class="user-line"><b>${esc(u.username)}</b> · ${roleLabel(u.role)} · ${u.active?'Active':'Disabled'} · User ID ${u.public_id||'------'} · Team ${u.team_id??'--'}<div class="user-actions"><button onclick="toggleUser(${u.id},${!u.active})">${u.active?'Disable':'Enable'}</button><button onclick="resetUserPassword(${u.id},'${esc(u.username)}')">Reset Password</button><button onclick="changeUserTeam(${u.id},${u.team_id??'null'})">Change Team</button><button onclick="showLoginLink('${esc(u.username)}')">Login Link</button></div></div>`).join('')||'<p class="muted">No employee accounts</p>';
  if(data['Telegram 客户']){
   const employeeChoices=(data['员工账号']||[]).filter(u=>u.active && ['employee','chatting','finding'].includes(u.role));
   $('customers').innerHTML=data['Telegram 客户'].map(c=>{
-   const assigned=(c.assigned_to||[]).map(a=>`${esc(a.username)} (ID ${a.user_id})`).join(', ')||'Unassigned';
-   return `<div class="item"><b>${esc(c.alias)}</b> · @${esc(c.telegram_username||'')} · Telegram ID ${esc(c.telegram_user_id)} · Phone ${esc(c.phone||'--')}<div class="muted">Assigned to: <b>${assigned}</b></div><div class="assign-actions"><select id="assign-${c.id}"><option value="">Select employee account</option>${employeeChoices.map(u=>`<option value="${u.id}">${esc(u.username)} · ID ${u.id} · ${u.role}</option>`).join('')}</select><button onclick="assignCustomer(${c.id})">Assign</button><button class="danger" onclick="revokeCustomer(${c.id})">Unassign</button></div></div>`;
+   const assigned=(c.assigned_to||[]).map(a=>`${esc(a.username)} (User ID ${a.user_id})`).join(', ')||'Unassigned';
+   return `<div class="item"><b>${esc(c.alias)}</b> · @${esc(c.telegram_username||'')} · Telegram ID ${esc(c.telegram_user_id)} · Phone ${esc(c.phone||'--')}<div class="muted">Assigned to: <b>${assigned}</b></div><div class="assign-actions"><select id="assign-${c.id}"><option value="">Select employee account</option>${employeeChoices.map(u=>`<option value="${u.id}">${esc(u.username)} · User ID ${u.public_id||'------'} · ${u.role}</option>`).join('')}</select><button onclick="assignCustomer(${c.id})">Assign</button><button class="danger" onclick="revokeCustomer(${c.id})">Unassign</button></div></div>`;
   }).join('')||'<p class="muted">No Telegram customers yet. Connect an account and wait for sync.</p>';
  }
  if(data['Telegram 连接账号'])$('accounts').innerHTML=data['Telegram 连接账号'].map(a=>`<div class="account-card"><b>Telegram Account #${a.id}</b><div class="meta">Account name: ${esc(a.label)}<br>Phone: ${esc(a.phone_masked)}<br>Status: <span class="account-status ${a.status==='connected'?'':'offline'}">${esc(a.status)}</span><br>Synced customers: ${a.customer_count??0}<br>Connected: ${formatMyanmar(a.created_at)}</div></div>`).join('')||'<p class="muted">No Telegram personal account connected</p>';
@@ -153,7 +155,7 @@ async function changeUserTeam(id,current){
  }catch(e){showModal('读取团队失败',e.message,true)}
 }
 async function showLoginLink(username){const path='/login/'+encodeURIComponent(username);let base='';try{base=(await api('/admin/app-url')).base_url||''}catch{}const url=base+path;showModal('Employee Login Link',`Account: ${username}`,false,`<div class="modal-linkrow"><input id="created-login-url" readonly value="${esc(url)}"><button onclick="copyCreatedLink()">Copy link</button></div><div class="modal-note">${base?'This link uses your configured branded domain.':'Set APP_BASE_URL to your own domain in hosting variables to create a full link without showing the hosting provider domain.'}</div>`)}
-async function assignCustomer(id){const selected=$('assign-'+id).value;if(!selected)return showModal('Select an employee','Choose a Chatting or Finding employee before assigning this customer.',true);try{const result=await api('/admin/assign',{method:'POST',body:JSON.stringify({customer_id:id,user_id:Number(selected)})});await loadAdmin();showModal('Customer assigned',`Customer #${id} is now assigned to ${result.username} (User ID ${result.user_id}). The employee can refresh the Chat Workspace to see the customer.`)}catch(e){showModal('Assignment failed',e.message,true)}}
+async function assignCustomer(id){const selected=$('assign-'+id).value;if(!selected)return showModal('Select an employee','Choose a Chatting or Finding employee before assigning this customer.',true);try{const result=await api('/admin/assign',{method:'POST',body:JSON.stringify({customer_id:id,user_id:Number(selected)})});await loadAdmin();showModal('Customer assigned',`Customer #${id} is now assigned to ${result.username} (User ID ${result.public_user_id||result.user_id}). The employee can refresh the Chat Workspace to see the customer.`)}catch(e){showModal('Assignment failed',e.message,true)}}
 async function revokeCustomer(id){try{await api('/admin/revoke/'+id,{method:'POST'});await loadAdmin();showModal('Assignment removed','The customer is no longer assigned. Chat history has been preserved.')}catch(e){showModal('Operation failed',e.message,true)}}
 async function beginTelegram(){try{let d=await api('/admin/telegram/begin',{method:'POST',body:JSON.stringify({phone:$('phone').value.trim()})});$('codehash').value=d.phone_code_hash;$('code').value='';$('tgpassword').value='';showModal('验证码已发送','请在 Telegram 官方客户端或短信中查看最新验证码，然后先填写验证码并点击「完成授权」。')}catch(e){showModal('发送验证码失败',e.message,true)}}
 async function completeTelegram(){try{let d=await api('/admin/telegram/complete',{method:'POST',body:JSON.stringify({phone_code_hash:$('codehash').value.trim(),code:$('code').value.trim(),password:$('tgpassword').value||null})});if(d.needs_password){showModal('需要 Telegram 两步验证','验证码已验证。现在请输入 Telegram 两步验证密码，再次点击「完成授权」。');return;}showModal('Telegram 账号连接成功',`账号：${d.label||''} · ${d.phone_masked||''}。系统已保存加密 Session，正在后台同步会话。`);$('code').value='';$('tgpassword').value='';await loadAdmin()}catch(e){showModal('Telegram 授权失败',e.message,true)}}function openUrl(url){window.open(url,'_blank','noopener,noreferrer')}function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
