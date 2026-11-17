@@ -1,5 +1,5 @@
 <!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>X-WALLET SERVER</title><style>
-:root{color-scheme:dark;font-family:Inter,Arial,sans-serif;background:#090d18;color:#eee}*{box-sizing:border-box}body{margin:0;min-height:100vh;background:radial-gradient(ellipse at 12% 8%,rgba(44,119,255,.18),transparent 34%),radial-gradient(ellipse at 88% 82%,rgba(157,62,255,.15),transparent 36%),linear-gradient(135deg,#080b14,#101827 48%,#090d18);background-attachment:fixed;position:relative;isolation:isolate}body:before,body:after{content:"";position:fixed;inset:-20%;z-index:-1;pointer-events:none;filter:blur(55px);opacity:.52;will-change:transform}body:before{background:conic-gradient(from 30deg at 28% 40%,transparent 0 18%,rgba(0,207,255,.24),transparent 34% 58%,rgba(95,89,255,.23),transparent 74%);animation:ambientFlow 22s ease-in-out infinite alternate}body:after{background:radial-gradient(ellipse at 70% 25%,rgba(45,117,255,.24),transparent 30%),radial-gradient(ellipse at 30% 80%,rgba(0,222,190,.15),transparent 28%);animation:ambientFlow2 17s ease-in-out infinite alternate}@keyframes ambientFlow{from{transform:translate3d(-2%,1%,0) rotate(-5deg) scale(.96)}to{transform:translate3d(3%,-2%,0) rotate(7deg) scale(1.08)}}@keyframes ambientFlow2{from{transform:translate3d(2%,-2%,0) scale(.94)}to{transform:translate3d(-3%,3%,0) scale(1.1)}}@media(prefers-reduced-motion:reduce){body:before,body:after{animation:none}}button,input,select,textarea{font:inherit}button{background:#3478f6;color:white;border:0;border-radius:8px;padding:10px 14px;cursor:pointer}button.secondary{background:#30343b}input,select,textarea{background:#292d33;color:#eee;border:1px solid #444;border-radius:8px;padding:11px;width:100%;margin:5px 0 12px}.layout{display:grid;grid-template-columns:230px 1fr;min-height:100vh}.side{background:#202124;padding:20px}.side h2{font-size:20px}.side button{display:block;width:100%;text-align:left;margin:8px 0;background:transparent}.main{padding:22px;min-width:0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px}.card{background:linear-gradient(145deg,rgba(29,36,51,.91),rgba(16,22,34,.88));border:1px solid rgba(119,157,221,.28);border-radius:14px;padding:16px;margin:10px 0;box-shadow:0 14px 36px rgba(0,0,0,.24),inset 0 1px 0 rgba(255,255,255,.045);backdrop-filter:blur(14px)}.muted{color:#9ca3af;font-size:13px}.hidden{display:none}.row{display:flex;gap:10px;align-items:center}.row>*{flex:1}.chatlayout{display:grid;grid-template-columns:270px 1fr 260px;gap:12px;height:70vh}.list,.messages,.profile{background:#1b1d20;border:1px solid #333;border-radius:10px;padding:12px;overflow:auto}.item{padding:12px;border-bottom:1px solid #333;cursor:pointer}.bubble{padding:10px 12px;border-radius:10px;background:#30343b;margin:8px 0;max-width:80%;white-space:pre-wrap}.out{background:#214a83;margin-left:auto}.tag{display:flex;gap:5px;align-items:center}.tag input{margin:3px 0}.danger{background:#9b2929}.ok{color:#42d392}.brand-logo{width:30px;height:30px;object-fit:contain;vertical-align:middle;margin-right:10px;background:#fff;border-radius:8px;padding:4px}.social-title{display:flex;align-items:center;gap:2px}.api-status{white-space:pre-wrap;border:1px solid #6b4d23;background:#302516;color:#ffd38a;padding:10px 12px;border-radius:8px;margin:10px 0}.api-status.ok{border-color:#245c42;background:#10291e;color:#80e0b1}
+:root{color-scheme:dark;font-family:Inter,Arial,sans-serif;background:#090d18;color:#eee}*{box-sizing:border-box}html,body{width:100%;min-height:100%;background-color:#090d18}body{margin:0;width:100%;min-height:100vh;min-height:100dvh;background:radial-gradient(ellipse at 12% 8%,rgba(44,119,255,.18),transparent 34%),radial-gradient(ellipse at 88% 82%,rgba(157,62,255,.15),transparent 36%),linear-gradient(135deg,#080b14,#101827 48%,#090d18);background-attachment:fixed;position:relative;isolation:isolate}body:before,body:after{content:"";position:fixed;inset:-20%;z-index:-1;pointer-events:none;filter:blur(55px);opacity:.52;will-change:transform}body:before{background:conic-gradient(from 30deg at 28% 40%,transparent 0 18%,rgba(0,207,255,.24),transparent 34% 58%,rgba(95,89,255,.23),transparent 74%);animation:ambientFlow 22s ease-in-out infinite alternate}body:after{background:radial-gradient(ellipse at 70% 25%,rgba(45,117,255,.24),transparent 30%),radial-gradient(ellipse at 30% 80%,rgba(0,222,190,.15),transparent 28%);animation:ambientFlow2 17s ease-in-out infinite alternate}@keyframes ambientFlow{from{transform:translate3d(-2%,1%,0) rotate(-5deg) scale(.96)}to{transform:translate3d(3%,-2%,0) rotate(7deg) scale(1.08)}}@keyframes ambientFlow2{from{transform:translate3d(2%,-2%,0) scale(.94)}to{transform:translate3d(-3%,3%,0) scale(1.1)}}@media(prefers-reduced-motion:reduce){body:before,body:after{animation:none}}button,input,select,textarea{font:inherit}button{background:#3478f6;color:white;border:0;border-radius:8px;padding:10px 14px;cursor:pointer}button.secondary{background:#30343b}input,select,textarea{background:#292d33;color:#eee;border:1px solid #444;border-radius:8px;padding:11px;width:100%;margin:5px 0 12px}.layout{display:grid;grid-template-columns:230px 1fr;min-height:100vh}.side{background:#202124;padding:20px}.side h2{font-size:20px}.side button{display:block;width:100%;text-align:left;margin:8px 0;background:transparent}.main{padding:22px;min-width:0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px}.card{background:linear-gradient(145deg,rgba(29,36,51,.91),rgba(16,22,34,.88));border:1px solid rgba(119,157,221,.28);border-radius:14px;padding:16px;margin:10px 0;box-shadow:0 14px 36px rgba(0,0,0,.24),inset 0 1px 0 rgba(255,255,255,.045);backdrop-filter:blur(14px)}.muted{color:#9ca3af;font-size:13px}.hidden{display:none}.row{display:flex;gap:10px;align-items:center}.row>*{flex:1}.chatlayout{display:grid;grid-template-columns:270px 1fr 260px;gap:12px;height:70vh}.list,.messages,.profile{background:#1b1d20;border:1px solid #333;border-radius:10px;padding:12px;overflow:auto}.item{padding:12px;border-bottom:1px solid #333;cursor:pointer}.bubble{padding:10px 12px;border-radius:10px;background:#30343b;margin:8px 0;max-width:80%;white-space:pre-wrap}.out{background:#214a83;margin-left:auto}.tag{display:flex;gap:5px;align-items:center}.tag input{margin:3px 0}.danger{background:#9b2929}.ok{color:#42d392}.brand-logo{width:30px;height:30px;object-fit:contain;vertical-align:middle;margin-right:10px;background:#fff;border-radius:8px;padding:4px}.social-title{display:flex;align-items:center;gap:2px}.api-status{white-space:pre-wrap;border:1px solid #6b4d23;background:#302516;color:#ffd38a;padding:10px 12px;border-radius:8px;margin:10px 0}.api-status.ok{border-color:#245c42;background:#10291e;color:#80e0b1}
 .modal-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.72);display:flex;align-items:center;justify-content:center;padding:20px;z-index:9999;backdrop-filter:blur(5px)}
 .modal-backdrop.hidden{display:none!important}.modal-panel{width:min(520px,100%);background:#1c2028;border:1px solid #3b4658;border-radius:16px;box-shadow:0 24px 80px rgba(0,0,0,.55);padding:24px;color:#f4f6fb;animation:modalIn .16s ease-out}
 @keyframes modalIn{from{opacity:0;transform:translateY(10px) scale(.985)}to{opacity:1;transform:none}}
@@ -82,6 +82,11 @@ main section{width:100%;min-width:0}
 .channel-launch-card a{color:#b9d5ff;text-decoration:none;font-size:12px}
 .login-shell{min-height:100vh;width:100%;display:flex;align-items:flex-start;justify-content:center;padding:68px 20px 30px}
 @media(max-width:900px){.layout{grid-template-columns:1fr}.side{display:flex;align-items:center;gap:6px;overflow:auto}.side h2{display:block;min-width:130px}.side button{white-space:nowrap;width:auto}.main{padding:14px}.chatlayout{height:auto;min-height:0;grid-template-columns:1fr}.chatlayout>.list,.chatlayout>.messages,.chatlayout>.profile{height:auto;max-height:42vh;border-right:0;border-bottom:1px solid rgba(119,157,221,.22)}}
+
+html,body{background-color:#090d18!important}
+body{background-repeat:no-repeat;background-size:cover;background-attachment:fixed;overflow-x:hidden}
+body:before,body:after{position:fixed;inset:0;width:100vw;height:100vh;min-height:100dvh}
+#login{width:min(500px,calc(100vw - 32px));margin:8vh auto!important;position:relative}
 </style></head><body><div id="login" class="card" style="max-width:420px;margin:8vh auto"><h1 id="loginbrand">X-WALLET CHATTING</h1><p class="muted">公司客服系统 · 独立员工登录</p><label>用户名</label><input id="username" autocomplete="username"><label>密码</label><input id="password" type="password" autocomplete="current-password"><button id="login-button" onclick="login()">登录</button><div id="twofa-step"><label>Google Authenticator 验证码</label><input id="login-2fa-code" inputmode="numeric" autocomplete="one-time-code" placeholder="输入 6 位验证码"><button onclick="verifyLogin2FA()">验证并登录</button></div><p id="loginerr" class="muted"></p></div>
 <div id="app" class="layout hidden"><aside class="side"><h2 id="brandname">X-WALLET SERVER</h2><button id="inboxnav" onclick="show('inbox')">💬 聊天工作台</button><button id="adminnav" onclick="show('admin')">⚙ 管理后台</button><button id="channelsnav" onclick="show('channels')">🔗 社交平台快捷入口</button><button id="logoutnav" onclick="logout()">退出登录</button><p id="who" class="muted"></p></aside><main class="main"><div class="main-top"><div class="top-actions"><button id="securitybtn" class="secondary" onclick="open2FASettings()">🔐 2FA 安全设置</button><div id="userpill" class="user-pill"></div></div></div><section id="inbox"><h1>聊天工作台</h1><div class="row"><input id="search" placeholder="搜索客户编号 / 昵称" oninput="renderInbox()"><select id="filter" onchange="renderInbox()"><option value="all">全部</option><option value="unread">未读</option><option value="unreplied">未回</option></select></div><div class="chatlayout"><div class="list" id="inboxlist"></div><div class="messages"><div id="chathead">选择一个客户</div><div id="messages" style="height:48vh;overflow:auto"></div><textarea id="compose" placeholder="输入消息..." rows="3"></textarea>
 <div class="chat-tools">
@@ -123,12 +128,19 @@ main section{width:100%;min-width:0}
   </div>
 </div>
 <script>
-let token=sessionStorage.getItem('crm_token'), me=null, activeCustomer=null, customers=[], pending2FA=null, mediaObjectUrls=[];const $=id=>document.getElementById(id);
+const loginPath=decodeURIComponent(location.pathname);
+const employeeRoute=loginPath.match(/^\/login\/([^/]+)\/?$/);
+const expectedUsername=employeeRoute?employeeRoute[1]:'';
+const superadminRoute=loginPath==='/superadmin-login';
+const sessionKey='xwallet_session_v2:'+ (employeeRoute?'employee:'+expectedUsername:(superadminRoute?'superadmin':'default'));
+let token=sessionStorage.getItem(sessionKey), me=null, activeCustomer=null, customers=[], pending2FA=null, mediaObjectUrls=[];
+const $=id=>document.getElementById(id);
+if(expectedUsername){$('username').value=expectedUsername;$('username').readOnly=true;}
+
 async function api(path,opts={}){
  const method=(opts.method||'GET').toUpperCase(); let r;
- const controller=new AbortController();const timeoutMs=path.includes('/telegram/accounts/') && path.endsWith('/sync')?300000:20000;const timeout=setTimeout(()=>controller.abort(),timeoutMs);
- try { r=await fetch('/api'+path,{...opts,signal:controller.signal,headers:{...(opts.body instanceof FormData?{}:{'Content-Type':'application/json'}),...(token?{Authorization:'Bearer '+token}:{}),...(opts.headers||{})}}); }
- catch(e){ const reason=e.name==='AbortError'?'请求超过时限，已自动停止。':(e.message||'');throw Error(`网络连接失败：${method} /api${path}。${reason} 请检查服务及 Railway 日志。`); } finally {clearTimeout(timeout);}
+ try { r=await fetch('/api'+path,{...opts,headers:{...(opts.body instanceof FormData?{}:{'Content-Type':'application/json'}),...(token?{Authorization:'Bearer '+token}:{}),...(opts.headers||{})}}); }
+ catch(e){ throw Error(`网络连接失败：${method} /api${path}。请检查服务是否正常运行。${e.message||''}`); }
  const raw=await r.text(); let d={}; try{d=raw?JSON.parse(raw):{};}catch{d={raw};}
  if(!r.ok){let detail=d.detail??d.message??d.raw??r.statusText??'Unknown error';if(typeof detail!=='string')detail=JSON.stringify(detail);throw Error(`${method} /api${path} [HTTP ${r.status}]：${detail}`);}
  return d;
@@ -138,26 +150,19 @@ function setAdminStatus(message,ok=false){const el=$('adminstatus');if(!el)retur
 async function login(){try{
  const d=await api('/auth/login',{method:'POST',body:JSON.stringify({username:$('username').value,password:$('password').value})});
  if(d.requires_2fa){pending2FA=d.challenge_token;$('twofa-step').style.display='block';$('login-2fa-code').focus();$('loginerr').textContent='请输入 Google Authenticator 当前显示的 6 位验证码。';return;}
- token=d.token;sessionStorage.setItem('crm_token',token);await init();
+ token=d.token;sessionStorage.setItem(sessionKey,token);await init();
  }catch(e){$('loginerr').textContent=e.message}}
 async function verifyLogin2FA(){try{
  if(!pending2FA)return;
  const d=await api('/auth/2fa/verify',{method:'POST',body:JSON.stringify({challenge_token:pending2FA,code:$('login-2fa-code').value.trim()})});
- pending2FA=null;token=d.token;sessionStorage.setItem('crm_token',token);await init();
+ pending2FA=null;token=d.token;sessionStorage.setItem(sessionKey,token);await init();
  }catch(e){$('loginerr').textContent=e.message}}
 async function init(){try{
  me=await api('/me');
- // A login URL is bound to the intended identity and role. Never let a token
- // from another login route turn this page into a different role's workspace.
- const loginPathMatch=location.pathname.match(/^\/login\/([^/]+)\/?$/);
- const onAdminLogin=location.pathname==='/superadmin-login';
- const isAdmin=['superadmin','admin'].includes(me.role);
- if((loginPathMatch && (decodeURIComponent(loginPathMatch[1])!==me.username || me.role==='superadmin')) || (onAdminLogin && !isAdmin)){
-   sessionStorage.removeItem('crm_token');token=null;me=null;$('app').classList.add('hidden');$('login').classList.remove('hidden');
-   $('loginerr').textContent='此登录链接与当前账号不匹配。请使用该账号专属登录链接。';return;
- }
+ if(expectedUsername && me.username.toLowerCase()!==expectedUsername.toLowerCase()) throw Error('此登录链接仅属于员工 '+expectedUsername+'，当前会话不匹配，请重新登录。');
+ if(superadminRoute && me.role!=='superadmin') throw Error('此页面仅允许超级管理员登录。');
  $('login').classList.add('hidden');$('app').classList.remove('hidden');
- const isFinding=me.role==='finding';
+ const isAdmin=['superadmin','admin'].includes(me.role), isFinding=me.role==='finding';
  $('who').textContent=`${roleLabel(me.role)} · User ID: ${me.public_id||'------'}`;
  $('userpill').innerHTML=`<span>User ID: ${esc(me.public_id||'------')}</span><span>${roleLabel(me.role)}</span>`;
  $('adminnav').classList.toggle('hidden',!isAdmin);
@@ -169,8 +174,8 @@ async function init(){try{
  document.title=isAdmin?'X-WALLET CHAT MANAGEMENT':'X-WALLET CHATTING';
  show('inbox');await renderInbox();
  if(!window.inboxRefreshTimer)window.inboxRefreshTimer=setInterval(()=>{if(token&&!document.hidden&&$('inbox')&&!$('inbox').classList.contains('hidden'))renderInbox()},10000);
- }catch(e){$('loginerr').textContent=e.message;sessionStorage.removeItem('crm_token');token=null;}}
-function logout(){sessionStorage.removeItem('crm_token');token=null;location.reload()}
+ }catch(e){$('loginerr').textContent=e.message;sessionStorage.removeItem(sessionKey);token=null;}}
+function logout(){sessionStorage.removeItem(sessionKey);token=null;location.reload()}
 function show(id){const isAdmin=me&&['superadmin','admin'].includes(me.role);const isFinding=me&&me.role==='finding';if(id==='admin'&&!isAdmin)id='inbox';if(id==='channels'&&!isAdmin&&!isFinding)id='inbox';['inbox','admin','channels'].forEach(x=>$(x).classList.toggle('hidden',x!==id));if(id==='admin')loadAdmin();if(id==='inbox')renderInbox()}
 async function renderInbox(){try{let f=$('filter').value;customers=await api('/inbox?filter='+f);let q=$('search').value.toLowerCase();customers=customers.filter(c=>(c.alias+' '+c.id).toLowerCase().includes(q));$('inboxlist').innerHTML=customers.map(c=>`<div class="item" onclick="openCustomer(${c.id})"><b>${esc(c.alias)}</b><div class="muted">${esc(c.last_message||'')}</div><small class="muted">${c.unread?c.unread+' 未读':''}</small></div>`).join('')||'<p class="muted">暂无已分配客户</p>'}catch(e){showModal('操作失败',e.message,true)}}
 async function renderMessageList(ms){
@@ -258,16 +263,16 @@ async function loadAdmin(){
  if(data['员工账号'])$('users').innerHTML=data['员工账号'].map(u=>`<div class="user-line"><b>${esc(u.username)}</b> · ${roleLabel(u.role)} · ${u.active?'Active':'Disabled'} · User ID ${u.public_id||'------'} · 2FA ${u.totp_enabled?'Enabled':'Not bound'} · Team ${u.team_id??'--'}<div class="user-actions"><button onclick="toggleUser(${u.id},${!u.active})">${u.active?'Disable':'Enable'}</button><button onclick="resetUserPassword(${u.id},'${esc(u.username)}')">Reset Password</button><button onclick="changeUserTeam(${u.id},${u.team_id??'null'})">Change Team</button>${(u.role==='admin'||u.role==='superadmin')&&me.role!=='superadmin'?'':`<button onclick="setupUser2FA(${u.id},'${esc(u.username)}')">${u.totp_enabled?'Rebind 2FA':'Set up 2FA'}</button>`}${me.role==='superadmin' && u.id!==me.id ? `<button class="danger" onclick="resetUser2FA(${u.id},'${esc(u.username)}')">Reset 2FA</button>` : ''}<button onclick="showLoginLink('${esc(u.username)}')">Login Link</button></div></div>`).join('')||'<p class="muted">No employee accounts</p>';
  if(data['Telegram 连接账号']){
   const selector=$('customer-account-filter'), previous=selector.value;
-  const accounts=data['Telegram 连接账号'];
-  selector.innerHTML='<option value="">请选择 Telegram 账号</option>'+accounts.map(a=>`<option value="${a.id}">${esc(a.label)} · Account #${a.id}</option>`).join('');
-  const chosen=(previous && accounts.some(a=>String(a.id)===previous))?previous:(accounts.length?String(accounts[0].id):'');
-  selector.value=chosen;
-  if(chosen) await loadAdminCustomers(chosen); else $('customers').innerHTML='<p class="muted">暂无已连接的 Telegram 账号。</p>';
-  $('accounts').innerHTML=accounts.map(a=>`<div class="account-card" id="tg-account-card-${a.id}"><b>Telegram Account #${a.id}</b><div class="telegram-account-profile"><img id="tg-account-avatar-${a.id}" src="/static/logos/telegram.svg" alt="Telegram account avatar"><div class="profile-lines"><b id="tg-account-name-${a.id}">${esc(a.label)}</b><div class="meta" id="tg-account-details-${a.id}">Phone: ${esc(a.phone_masked)} · 正在读取 Telegram 资料…</div></div></div><div class="meta">Status: <span class="account-status ${a.status==='connected'?'':'offline'}">${esc(a.status)}</span><br>Synced customers: <span id="tg-count-${a.id}">${a.customer_count??0}</span><br>Connected: ${formatMyanmar(a.created_at)}</div><div class="account-actions"><button onclick="syncTelegramAccount(${a.id})">Sync all chats</button><button class="secondary" onclick="loadTelegramAccountProfile(${a.id})">Refresh profile</button></div></div>`).join('')||'<p class="muted">No Telegram personal account connected</p>';
-  for(const a of accounts) loadTelegramAccountProfile(a.id);
+  selector.innerHTML='<option value="">请选择 Telegram 账号</option>'+data['Telegram 连接账号'].map(a=>`<option value="${a.id}">${esc(a.label)} · Account #${a.id}</option>`).join('');
+  if(previous && data['Telegram 连接账号'].some(a=>String(a.id)===previous))selector.value=previous;
+  else if(data['Telegram 连接账号'].length)selector.value=String(data['Telegram 连接账号'][0].id);
+  await loadAdminCustomers();
  }
- if(errors.length){setAdminStatus('管理后台部分数据读取失败：\n'+errors.join('\n'));}
- else if(!data['系统诊断']){setAdminStatus('员工、团队和 Telegram 数据已读取；系统诊断接口未返回数据。');}
+ if(data['Telegram 连接账号']){
+  $('accounts').innerHTML=data['Telegram 连接账号'].map(a=>`<div class="account-card" id="tg-account-card-${a.id}"><b>Telegram Account #${a.id}</b><div class="telegram-account-profile"><img id="tg-account-avatar-${a.id}" src="/static/logos/telegram.svg" alt="Telegram account avatar"><div class="profile-lines"><b id="tg-account-name-${a.id}">${esc(a.label)}</b><div class="meta" id="tg-account-details-${a.id}">Phone: ${esc(a.phone_masked)} · Loading Telegram profile…</div></div></div><div class="meta">Status: <span class="account-status ${a.status==='connected'?'':'offline'}">${esc(a.status)}</span><br>Synced customers: ${a.customer_count??0}<br>Connected: ${formatMyanmar(a.created_at)}</div><div class="account-actions"><button onclick="syncTelegramAccount(${a.id})">Sync all chats</button><button class="secondary" onclick="loadTelegramAccountProfile(${a.id})">Refresh profile</button></div></div>`).join('')||'<p class="muted">No Telegram personal account connected</p>';
+  for(const a of data['Telegram 连接账号'])loadTelegramAccountProfile(a.id);
+ }
+ if(errors.length){setAdminStatus('部分管理接口请求失败：\n'+errors.join('\n'));}else if(!data['系统诊断']){setAdminStatus('管理数据已加载，但系统诊断不可用。');}
 }
 async function syncSelectedTelegramAccount(){
  const id=Number($('customer-account-filter')?.value||0);
@@ -280,40 +285,41 @@ async function loadTelegramAccountProfile(id){
   const name=p.name||'Telegram Account';
   $('tg-account-name-'+id).textContent=name;
   $('tg-account-details-'+id).innerHTML=`Username: ${p.username?'@'+esc(p.username):'--'}<br>Phone: ${esc(p.phone||'--')}<br>Telegram ID: ${esc(p.id||'--')}`;
-  if(p.avatar_available){const r=await fetch('/api/admin/telegram/accounts/'+id+'/avatar',{headers:{Authorization:'Bearer '+token}});if(r.ok){const blob=await r.blob();const url=URL.createObjectURL(blob);$('tg-account-avatar-'+id).src=url;}}
- }catch(e){const el=$('tg-account-details-'+id);if(el)el.textContent='Telegram profile unavailable: '+e.message;}
+  if(p.avatar_available){
+   const r=await fetch('/api/admin/telegram/accounts/'+id+'/avatar',{headers:{Authorization:'Bearer '+token}});
+   if(r.ok){const blob=await r.blob();const url=URL.createObjectURL(blob);$('tg-account-avatar-'+id).src=url;}
+  }
+ }catch(e){
+  const el=$('tg-account-details-'+id);if(el)el.textContent='Telegram profile unavailable: '+e.message;
+ }
 }
 async function syncTelegramAccount(id){
- const buttons=Array.from(document.querySelectorAll('button[onclick*="syncTelegramAccount("],button[onclick*="syncSelectedTelegramAccount("]'));
- buttons.forEach(b=>{b.disabled=true;if(b.textContent.includes('Sync'))b.textContent='Syncing…'});
  try{
   const result=await api('/admin/telegram/accounts/'+id+'/sync',{method:'POST'});
-  await loadAdminCustomers(String(id));
-  const countEl=$('tg-count-'+id);if(countEl)countEl.textContent=String(result.customer_count??0);
-  showModal(result.complete===false?'Telegram 部分同步完成':'Telegram 同步完成',`账号 #${id}\n扫描会话：${result.dialogs_seen??0}\n客户记录：${result.customer_count??0}\n新增客户：${result.customers_created??0}\n新增聊天消息：${result.messages_saved??0}${result.warnings?.length?'\n\n注意：\n'+result.warnings.join('\n'):''}`,!!result.complete===false);
- }catch(e){showModal('Telegram 同步失败',e.message+'\n请查看 Railway Deploy Logs；不会再把失败伪装成同步成功。',true);}
- finally{buttons.forEach(b=>{b.disabled=false;if(b.textContent==='Syncing…')b.textContent='Sync all chats';});}
+  showModal('Telegram 客户列表已同步',`Account #${id}\n客户会话：${result.dialog_count ?? result.customer_count}\n数据库客户：${result.customer_count}\n新增客户：${result.created_count ?? 0}\n更新客户：${result.updated_count ?? 0}\n聊天记录正在后台导入，页面可以先进行客户分配。`);
+  await loadAdmin();
+ }catch(e){showModal('Telegram 同步失败',e.message,true)}
 }
-async function loadAdminCustomers(accountId=null){
+async function loadAdminCustomers(){
  const selector=$('customer-account-filter');if(!selector)return;
- const account=String(accountId||selector.value||'').trim();
+ const account=selector.value;
  if(!account){$('customers').innerHTML='<p class="muted">请先选择一个 Telegram 连接账号。</p>';return;}
- selector.value=account;
- $('customers').innerHTML='<p class="muted">正在读取该 Telegram 账号的客户列表…</p>';
  try{
   const data=await api('/admin/customers?account_id='+encodeURIComponent(account));
-  if(!Array.isArray(data))throw Error('客户接口返回格式错误：预期为客户数组。');
   const employeeChoices=(await api('/admin/users')).filter(u=>u.active && ['employee','chatting','finding'].includes(u.role));
   $('bulk-employee').innerHTML='<option value="">Select employee for bulk assignment</option>'+employeeChoices.map(u=>`<option value="${u.id}">${esc(u.username)} · User ID ${u.public_id||'------'} · ${u.role}</option>`).join('');
-  $('customers').innerHTML=`<div class="muted" style="margin:8px 0 12px">Account #${esc(account)} · ${data.length} customer(s)</div>`+(data.map(c=>{
+  $('customers').innerHTML=data.map(c=>{
    const displayName=c.name||(c.alias && !/^Customer-\d+/i.test(c.alias) && c.alias!=='@'+(c.telegram_username||'')?c.alias:'Telegram User');
    const username=c.telegram_username?'@'+c.telegram_username:'';
-   const assigned=(c.assigned_to||[]).map(a=>`${esc(a.username)} (User ID ${esc(a.user_id)})`).join(', ')||'Unassigned';
-   return `<div class="item"><div class="customer-row"><input class="customer-select customer-check" type="checkbox" value="${c.id}" onchange="updateSelectedCount()" aria-label="Select customer"><img id="customer-avatar-${c.id}" class="customer-avatar" alt="Telegram avatar" src="/static/logos/telegram.svg"><div><b>${esc(displayName)}</b> ${username?`· ${esc(username)}`:''}<div class="muted">Phone: ${esc(c.phone||'--')} · Telegram ID: ${esc(c.telegram_user_id||'--')} · Account #${c.account_id}</div><div class="muted">Assigned to: <b>${assigned}</b></div></div></div><div class="assign-actions"><select id="assign-${c.id}"><option value="">Select employee account</option>${employeeChoices.map(u=>`<option value="${u.id}">${esc(u.username)} · User ID ${u.public_id||'------'} · ${u.role}</option>`).join('')}</select><button onclick="assignCustomer(${c.id})">Assign</button><button class="danger" onclick="revokeCustomer(${c.id})">Unassign</button></div></div>`;
-  }).join('')||'<p class="muted">此 Telegram 账号目前没有客户记录。请先点击 Sync selected account。</p>');
+   const assigned=(c.assigned_to||[]).map(a=>`${esc(a.username)} (User ID ${a.user_id})`).join(', ')||'Unassigned';
+   return `<div class="item"><div class="customer-row"><input class="customer-select customer-check" type="checkbox" value="${c.id}" onchange="updateSelectedCount()" aria-label="Select customer"><img id="customer-avatar-${c.id}" class="customer-avatar" alt="Telegram avatar" src="/static/logos/telegram.svg"><div><b>${esc(displayName)}</b> ${username?`· ${esc(username)}`:''}<div class="muted">Phone: ${esc(c.phone||'--')} · Account #${c.account_id}</div><div class="muted">Assigned to: <b>${assigned}</b></div></div></div><div class="assign-actions"><select id="assign-${c.id}"><option value="">Select employee account</option>${employeeChoices.map(u=>`<option value="${u.id}">${esc(u.username)} · User ID ${u.public_id||'------'} · ${u.role}</option>`).join('')}</select><button onclick="assignCustomer(${c.id})">Assign</button><button class="danger" onclick="revokeCustomer(${c.id})">Unassign</button></div></div>`;
+  }).join('')||'<p class="muted">此 Telegram 账号目前没有客户。</p>';
   $('select-all-customers').checked=false;updateSelectedCount();
-  for(const c of data){if(!c.avatar_available)continue;try{const r=await fetch('/api/admin/customers/'+c.id+'/avatar',{headers:{Authorization:'Bearer '+token}});if(r.ok){const blob=await r.blob(),url=URL.createObjectURL(blob);const img=$('customer-avatar-'+c.id);if(img)img.src=url;}}catch(e){console.warn('avatar preview failed',e)}}
- }catch(e){$('customers').innerHTML='<p class="muted">客户列表读取失败：'+esc(e.message)+'</p>';}
+  for(const c of data){if(!c.avatar_available)continue;try{
+   const r=await fetch('/api/admin/customers/'+c.id+'/avatar',{headers:{Authorization:'Bearer '+token}});
+   if(r.ok){const blob=await r.blob(),url=URL.createObjectURL(blob);const img=$('customer-avatar-'+c.id);if(img)img.src=url;}
+  }catch(e){console.warn('avatar preview failed',e)}}
+ }catch(e){$('customers').innerHTML='<p class="muted">'+esc(e.message)+'</p>'}
 }
 async function toggleUser(id,active){try{await api('/admin/users/'+id+'?active='+active,{method:'PATCH'});await loadAdmin();showModal('账号状态已更新',active?'账号已恢复启用。':'账号已禁用。')}catch(e){showModal('操作失败',e.message,true)}}
 function resetUserPassword(id,username){
@@ -374,6 +380,6 @@ function roleLabel(role){return ({superadmin:'Super Admin',admin:'Administrator'
 function formatMyanmar(value){if(!value)return '--';const d=new Date(value);if(Number.isNaN(d.getTime()))return String(value);return new Intl.DateTimeFormat('en-GB',{timeZone:'Asia/Yangon',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}).format(d)+' (MMT)'}
 $('compose').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send()}});$('password').addEventListener('keydown',e=>{if(e.key==='Enter')login()});$('login-2fa-code').addEventListener('keydown',e=>{if(e.key==='Enter')verifyLogin2FA()});window.addEventListener('focus',()=>{if(token&&$('inbox')&&!$('inbox').classList.contains('hidden'))renderInbox()});
 
-const loginPath=location.pathname.match(/^\/login\/([^/]+)\/?$/);const adminLoginPath=location.pathname==='/superadmin-login';if(adminLoginPath){$('loginbrand').textContent='X-WALLET CHAT MANAGEMENT';document.title='X-WALLET CHAT MANAGEMENT';document.querySelector('#login .muted').textContent='Super Administrator · Secure Management Login'}if(loginPath){try{$('username').value=decodeURIComponent(loginPath[1]);$('password').focus()}catch{}}
+const adminLoginPath=location.pathname==='/superadmin-login';if(adminLoginPath){$('loginbrand').textContent='X-WALLET CHAT MANAGEMENT';document.title='X-WALLET CHAT MANAGEMENT';document.querySelector('#login .muted').textContent='Super Administrator · Secure Management Login'}if(employeeRoute){$('password').focus()}
 if(token)init();
 </script></body></html>

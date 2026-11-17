@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from sqlalchemy import desc, text
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from .db import Base, engine, get_db, SessionLocal
 from .models import User, Team, TgAccount, Customer, Assignment, Message, Tag, AuditLog, ReadState
 from .security import hash_password, verify_password, create_token, decode_token, create_2fa_challenge, encrypt_session, decrypt_session
@@ -44,7 +45,7 @@ with SessionLocal() as _migration_db:
         _user.public_id = make_public_user_id(_migration_db)
     _migration_db.commit()
 
-app = FastAPI(title='X-Wallet Chat Management', version='6.3.0')
+app = FastAPI(title='X-Wallet Chat Management', version='7.3.0')
 app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins.split(','), allow_credentials=False, allow_methods=['*'], allow_headers=['*'])
 app.mount('/static', StaticFiles(directory='static'), name='static')
 
@@ -167,7 +168,16 @@ def superadmin(user: User = Depends(current_user)):
     return user
 
 def audit(db, actor, action, typ='', target='', detail=''):
-    db.add(AuditLog(actor_user_id=actor.id if actor else None, action=action, target_type=typ, target_id=str(target), detail=detail)); db.commit()
+    # Auditing must never turn a successfully completed primary operation into
+    # a misleading HTTP 500. Failures are logged and the business transaction
+    # remains committed.
+    try:
+        db.add(AuditLog(actor_user_id=actor.id if actor else None, action=action,
+                        target_type=typ, target_id=str(target), detail=detail))
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        print('audit write failed:', repr(exc))
 
 def can_access(db: Session, user: User, customer_id: int):
     if user.role in ('superadmin','admin'): return True
@@ -285,10 +295,37 @@ def list_users(db: Session = Depends(get_db), actor: User = Depends(admin)):
 
 @app.post('/api/admin/users')
 def create_user(data: UserIn, request: Request, db: Session = Depends(get_db), actor: User = Depends(admin)):
-    if data.role not in ('admin','employee','chatting','finding'): raise HTTPException(400,'Role must be admin, Chatting, or Finding')
-    if db.query(User).filter_by(username=data.username).first(): raise HTTPException(409,'Username already exists')
-    if data.team_id and not db.get(Team,data.team_id): raise HTTPException(404,'Team not found')
-    u=User(username=data.username,public_id=make_public_user_id(db),password_hash=hash_password(data.password),role=data.role,team_id=data.team_id); db.add(u); db.commit(); db.refresh(u); audit(db,actor,'user.create','user',u.id); base='https://xwalletchatserver-production.up.railway.app'; login_url=(base + '/login/' + u.username) if base else ('/login/' + u.username); return {'id':u.id,'public_id':u.public_id,'username':u.username,'role':u.role,'login_url':login_url,'needs_custom_domain':False}
+    username = data.username.strip()
+    if not username or len(username) > 80:
+        raise HTTPException(400, 'Username must contain 1 to 80 characters')
+    if data.role not in ('admin', 'employee', 'chatting', 'finding'):
+        raise HTTPException(400, 'Role must be admin, Chatting, or Finding')
+    if len(data.password) < 10:
+        raise HTTPException(400, 'Password must be at least 10 characters')
+    if db.query(User).filter_by(username=username).first():
+        raise HTTPException(409, 'Username already exists')
+    if data.team_id is not None and not db.get(Team, data.team_id):
+        raise HTTPException(404, 'Team not found')
+    try:
+        u = User(username=username, public_id=make_public_user_id(db),
+                 password_hash=hash_password(data.password), role=data.role,
+                 team_id=data.team_id, active=True)
+        db.add(u)
+        db.flush()
+        db.commit()
+        db.refresh(u)
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(409, 'Username or public user ID already exists. Please retry.') from exc
+    except Exception as exc:
+        db.rollback()
+        print('employee creation failed:', repr(exc))
+        raise HTTPException(500, 'Employee account could not be created. Check Railway application logs and database connectivity.') from exc
+    audit(db, actor, 'user.create', 'user', u.id)
+    base_url = (os.getenv('APP_BASE_URL') or 'https://xwalletchatserver-production.up.railway.app').rstrip('/')
+    login_url = base_url + '/login/' + u.username
+    return {'id': u.id, 'public_id': u.public_id, 'username': u.username,
+            'role': u.role, 'login_url': login_url, 'needs_custom_domain': False}
 
 @app.patch('/api/admin/users/{uid}')
 def update_user(uid:int, active:bool, db:Session=Depends(get_db), actor:User=Depends(admin)):
@@ -364,19 +401,18 @@ async def admin_sync_telegram_account(account_id: int, db: Session = Depends(get
     if not client or not client.is_connected():
         raise HTTPException(409, 'Telegram account is not connected. Reconnect this account first.')
     try:
-        summary = await tg.sync_dialogs(account_id, client)
+        # Index every chat first so the admin customer list is populated quickly.
+        result = await tg.sync_dialogs(account_id, client, sync_messages=False)
     except Exception as exc:
-        raise HTTPException(502, f'Telegram sync failed: {exc}')
+        db.rollback()
+        raise HTTPException(502, f'Telegram dialog sync failed: {exc}')
     count = db.query(Customer).filter_by(account_id=account_id).count()
     audit(db, actor, 'telegram.account.sync', 'telegram_account', account_id,
-          f"customers={count}; dialogs={summary.get('dialogs_seen', 0)}; messages={summary.get('messages_saved', 0)}; complete={summary.get('complete', False)}")
-    return {'ok': bool(summary.get('complete')), 'account_id': account_id,
-            'customer_count': count, 'dialogs_seen': summary.get('dialogs_seen', 0),
-            'customers_created': summary.get('customers_created', 0),
-            'customers_updated': summary.get('customers_updated', 0),
-            'messages_saved': summary.get('messages_saved', 0),
-            'folders_scanned': summary.get('folders_scanned', []),
-            'warnings': summary.get('warnings', []), 'complete': summary.get('complete', False)}
+          f'customers={count}; dialogs={result.get("dialog_count", 0)}')
+    # Import message history after returning the complete customer index.
+    asyncio.create_task(tg.sync_dialog_messages(account_id, client))
+    return {'ok': True, **result, 'customer_count': count,
+            'message': 'All available chat dialogs have been indexed. Message history is importing in the background.'}
 
 @app.get('/api/admin/telegram/accounts/{account_id}/profile')
 async def admin_telegram_account_profile(account_id: int, actor: User = Depends(admin)):

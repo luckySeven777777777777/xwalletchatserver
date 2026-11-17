@@ -1,4 +1,4 @@
-# X-WALLET Chat Management (Railway) — v6.3
+# Telegram CRM Management (Railway starter)
 
 A deployable first-stage CRM scaffold for ordinary Telegram user accounts using MTProto, with separate admin/employee logins, assignment-based access, employee-private tags, team-shared tags, persistent message storage, and external social-site shortcuts.
 
@@ -71,14 +71,6 @@ Use two Telegram test accounts, one admin, and two employees:
 - Add websocket push for realtime UI (current UI refreshes on demand).
 - Add assignment quotas and daily reception counters with proper business timezone configuration.
 
-
-## v6.3 repair notes
-- Login tokens are isolated per browser tab with `sessionStorage`, preventing a Chatting/Finding login in another tab from overwriting the Super Admin session. Refresh retains the same tab's role session.
-- Employee login links are checked against the authenticated username; the Super Admin login route rejects non-admin roles.
-- Admin data requests have bounded timeouts and report partial API failures instead of leaving the dashboard indefinitely in a loading state.
-- Telegram sync now returns dialog/customer/message counts and explicit warnings. Sync exceptions are no longer swallowed and presented as success.
-- The selected Telegram account ID is passed explicitly into customer-list loading; the list displays the returned record count and refreshes after sync.
-- Main and archived Telegram dialog folders are scanned where supported. Per-dialog failures are reported; the UI distinguishes a complete sync from a partial sync.
 
 ## v3 repair notes
 - Team list is loaded in the admin panel; new employees can be assigned to a team at creation, and existing users can be moved between teams.
@@ -166,3 +158,15 @@ This release addresses the issues reported after v6.1:
 6. Verify employee permissions using one Chatting account and one Finding account before assigning live customers.
 
 This release has Python and JavaScript syntax checks completed. Runtime integration tests against the live Railway database and Telegram accounts must still be performed after deployment.
+
+
+## v7.3 repair notes (based on the supplied v7.2 backup)
+
+- Login tokens are stored in per-tab `sessionStorage` keys scoped to the current employee login URL; `/login/<username>` rejects a session whose authenticated username does not match the link, and `/superadmin-login` accepts only the super administrator role.
+- Login background layers now cover the complete viewport, including dynamic viewport height.
+- Employee creation now validates and commits the user record separately from best-effort audit logging, handles uniqueness conflicts, and returns a clear server error while writing the underlying exception to Railway logs.
+- Telegram synchronization indexes regular and archived chat dialogs first, commits the full customer index, and starts message-history import in the background so the admin customer list can appear without waiting for message downloads.
+- Message history import runs in the background after the complete customer/dialog index is committed. It requests all message history available from Telegram; completion time depends on the number of dialogs, message volume, and media downloads.
+- Social Channels can request launch of registered desktop-app protocols or open official websites. A browser page cannot embed/control another vendor's native desktop application inside the web page; Windows/browser protocol permissions still apply.
+
+Run the existing deployment with the same Railway service, PostgreSQL database, volume, and environment variables. Do not delete or recreate the database or Telegram session volume.
