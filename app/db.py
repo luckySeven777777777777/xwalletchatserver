@@ -1,8 +1,15 @@
+import os, shutil
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, DeclarativeBase
 from .config import settings
 
 url = settings.database_url
+# One-time migration for deployments that previously used the container-local
+# SQLite file before a Railway Volume was mounted at /data.
+if url == "sqlite:////data/xwallet.db" and os.path.isdir("/data") and not os.path.exists("/data/xwallet.db"):
+    legacy = os.path.abspath("./telegram_crm.db")
+    if os.path.isfile(legacy):
+        shutil.copy2(legacy, "/data/xwallet.db")
 if url.startswith("postgres://"):
     url = url.replace("postgres://", "postgresql+psycopg://", 1)
 elif url.startswith("postgresql://") and "+psycopg" not in url:

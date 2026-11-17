@@ -170,3 +170,17 @@ This release has Python and JavaScript syntax checks completed. Runtime integrat
 - Social Channels can request launch of registered desktop-app protocols or open official websites. A browser page cannot embed/control another vendor's native desktop application inside the web page; Windows/browser protocol permissions still apply.
 
 Run the existing deployment with the same Railway service, PostgreSQL database, volume, and environment variables. Do not delete or recreate the database or Telegram session volume.
+
+
+## v7.4 reliability notes (Railway)
+
+- The root login page and `/superadmin-login` identify as **X-WALLET CHAT SERVER**. Employee links under `/login/{username}` identify as **X-WALLET CHATTING**.
+- Login sessions use `sessionStorage` with a dedicated key for the super administrator and a separate key per employee username. Refreshing a page keeps that tab's session; one employee link does not overwrite another employee or the administrator session.
+- If `DATABASE_URL` is configured, the app uses that database (recommended: Railway PostgreSQL reference variable). If it is not configured and a Railway Volume is mounted at `/data`, the app now uses `/data/xwallet.db` rather than the disposable container filesystem. A pre-existing `./telegram_crm.db` is copied once to the volume on first startup when applicable.
+- Set `UPLOAD_DIR=/data/uploads` when using the Railway Volume so uploaded media also persists.
+- Employee usernames are resolved case-insensitively; the password remains case-sensitive. Passwords must be at least 10 characters and no more than 72 UTF-8 bytes with the current bcrypt hash scheme.
+- An HTTP 401 during employee login means the account was not found in the active database, is disabled, or the supplied password does not match. The server log now records which category occurred without logging the password. An administrator can use **Reset Password** in the employee account list and share the new password securely.
+
+### Railway database setup recommendation
+
+In the X-Wallet service Variables, set `DATABASE_URL` to the Railway PostgreSQL service reference (for example `${{Postgres.DATABASE_URL}}`) if PostgreSQL is attached. Do not point different app services or replicas at separate SQLite files. If using the mounted Volume fallback instead, keep the volume mounted at `/data` for every deployment and retain `UPLOAD_DIR=/data/uploads`.

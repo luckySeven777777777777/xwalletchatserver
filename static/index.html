@@ -83,10 +83,13 @@ main section{width:100%;min-width:0}
 .login-shell{min-height:100vh;width:100%;display:flex;align-items:flex-start;justify-content:center;padding:68px 20px 30px}
 @media(max-width:900px){.layout{grid-template-columns:1fr}.side{display:flex;align-items:center;gap:6px;overflow:auto}.side h2{display:block;min-width:130px}.side button{white-space:nowrap;width:auto}.main{padding:14px}.chatlayout{height:auto;min-height:0;grid-template-columns:1fr}.chatlayout>.list,.chatlayout>.messages,.chatlayout>.profile{height:auto;max-height:42vh;border-right:0;border-bottom:1px solid rgba(119,157,221,.22)}}
 
-html,body{background-color:#090d18!important}
-body{background-repeat:no-repeat;background-size:cover;background-attachment:fixed;overflow-x:hidden}
-body:before,body:after{position:fixed;inset:0;width:100vw;height:100vh;min-height:100dvh}
-#login{width:min(500px,calc(100vw - 32px));margin:8vh auto!important;position:relative}
+html{width:100%;min-height:100%;background:#090d18;}
+html::before{content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;background:radial-gradient(ellipse at 12% 8%,rgba(44,119,255,.22),transparent 42%),radial-gradient(ellipse at 88% 82%,rgba(157,62,255,.18),transparent 44%),radial-gradient(ellipse at 50% 100%,rgba(0,207,190,.12),transparent 42%),linear-gradient(135deg,#080b14 0%,#101827 48%,#090d18 100%);background-size:100% 100%;}
+html,body{width:100%;min-width:0;min-height:100%;background-color:transparent!important;}
+body{margin:0;min-height:100vh;min-height:100dvh;background:transparent!important;background-image:none!important;overflow-x:hidden;}
+body::before,body::after{display:none!important}
+#login{width:min(500px,calc(100vw - 32px));margin:8vh auto!important;position:relative;z-index:1}
+#app{position:relative;z-index:1;min-height:100vh}
 </style></head><body><div id="login" class="card" style="max-width:420px;margin:8vh auto"><h1 id="loginbrand">X-WALLET CHATTING</h1><p class="muted">公司客服系统 · 独立员工登录</p><label>用户名</label><input id="username" autocomplete="username"><label>密码</label><input id="password" type="password" autocomplete="current-password"><button id="login-button" onclick="login()">登录</button><div id="twofa-step"><label>Google Authenticator 验证码</label><input id="login-2fa-code" inputmode="numeric" autocomplete="one-time-code" placeholder="输入 6 位验证码"><button onclick="verifyLogin2FA()">验证并登录</button></div><p id="loginerr" class="muted"></p></div>
 <div id="app" class="layout hidden"><aside class="side"><h2 id="brandname">X-WALLET SERVER</h2><button id="inboxnav" onclick="show('inbox')">💬 聊天工作台</button><button id="adminnav" onclick="show('admin')">⚙ 管理后台</button><button id="channelsnav" onclick="show('channels')">🔗 社交平台快捷入口</button><button id="logoutnav" onclick="logout()">退出登录</button><p id="who" class="muted"></p></aside><main class="main"><div class="main-top"><div class="top-actions"><button id="securitybtn" class="secondary" onclick="open2FASettings()">🔐 2FA 安全设置</button><div id="userpill" class="user-pill"></div></div></div><section id="inbox"><h1>聊天工作台</h1><div class="row"><input id="search" placeholder="搜索客户编号 / 昵称" oninput="renderInbox()"><select id="filter" onchange="renderInbox()"><option value="all">全部</option><option value="unread">未读</option><option value="unreplied">未回</option></select></div><div class="chatlayout"><div class="list" id="inboxlist"></div><div class="messages"><div id="chathead">选择一个客户</div><div id="messages" style="height:48vh;overflow:auto"></div><textarea id="compose" placeholder="输入消息..." rows="3"></textarea>
 <div class="chat-tools">
@@ -128,14 +131,20 @@ body:before,body:after{position:fixed;inset:0;width:100vw;height:100vh;min-heigh
   </div>
 </div>
 <script>
-const loginPath=decodeURIComponent(location.pathname);
-const employeeRoute=loginPath.match(/^\/login\/([^/]+)\/?$/);
+const currentPath=location.pathname;
+let decodedPath=currentPath;
+try{decodedPath=decodeURIComponent(currentPath)}catch{}
+const employeeRoute=decodedPath.match(/^\/login\/([^/]+)\/?$/);
 const expectedUsername=employeeRoute?employeeRoute[1]:'';
-const superadminRoute=loginPath==='/superadmin-login';
-const sessionKey='xwallet_session_v2:'+ (employeeRoute?'employee:'+expectedUsername:(superadminRoute?'superadmin':'default'));
+const superadminRoute=decodedPath==='/superadmin-login';
+// A distinct sessionStorage key per employee link, plus a dedicated admin key.
+// sessionStorage survives refresh but is not shared between browser tabs.
+const sessionKey='xwallet_session_v3:'+ (employeeRoute?'employee:'+expectedUsername.toLowerCase():'superadmin');
 let token=sessionStorage.getItem(sessionKey), me=null, activeCustomer=null, customers=[], pending2FA=null, mediaObjectUrls=[];
 const $=id=>document.getElementById(id);
-if(expectedUsername){$('username').value=expectedUsername;$('username').readOnly=true;}
+if(expectedUsername){$('username').value=expectedUsername;$('username').readOnly=true;$('loginbrand').textContent='X-WALLET CHATTING';document.title='X-WALLET CHATTING';}
+else{$('loginbrand').textContent='X-WALLET CHAT SERVER';document.title='X-WALLET CHAT SERVER';}
+if(superadminRoute){$('loginbrand').textContent='X-WALLET CHAT SERVER';document.querySelector('#login .muted').textContent='Super Administrator · Secure Server Login';}
 
 async function api(path,opts={}){
  const method=(opts.method||'GET').toUpperCase(); let r;
@@ -160,7 +169,7 @@ async function verifyLogin2FA(){try{
 async function init(){try{
  me=await api('/me');
  if(expectedUsername && me.username.toLowerCase()!==expectedUsername.toLowerCase()) throw Error('此登录链接仅属于员工 '+expectedUsername+'，当前会话不匹配，请重新登录。');
- if(superadminRoute && me.role!=='superadmin') throw Error('此页面仅允许超级管理员登录。');
+ if(superadminRoute && me.role!=='superadmin') throw Error('此入口仅允许超级管理员登录。请使用超级管理员账号。');
  $('login').classList.add('hidden');$('app').classList.remove('hidden');
  const isAdmin=['superadmin','admin'].includes(me.role), isFinding=me.role==='finding';
  $('who').textContent=`${roleLabel(me.role)} · User ID: ${me.public_id||'------'}`;
@@ -169,9 +178,10 @@ async function init(){try{
  $('channelsnav').classList.toggle('hidden',!(isAdmin||isFinding));
  $('who').classList.toggle('hidden',!isAdmin);
  $('securitybtn').classList.toggle('hidden',!isAdmin);
- $('brandname').textContent=isAdmin?'X-WALLET CHAT MANAGEMENT':'X-WALLET CHATTING';
- $('loginbrand').textContent=isAdmin?'X-WALLET CHAT MANAGEMENT':'X-WALLET CHATTING';
- document.title=isAdmin?'X-WALLET CHAT MANAGEMENT':'X-WALLET CHATTING';
+ const appBrand=me.role==='superadmin'?'X-WALLET CHAT SERVER':(me.role==='admin'?'X-WALLET CHAT MANAGEMENT':'X-WALLET CHATTING');
+ $('brandname').textContent=appBrand;
+ $('loginbrand').textContent=appBrand;
+ document.title=appBrand;
  show('inbox');await renderInbox();
  if(!window.inboxRefreshTimer)window.inboxRefreshTimer=setInterval(()=>{if(token&&!document.hidden&&$('inbox')&&!$('inbox').classList.contains('hidden'))renderInbox()},10000);
  }catch(e){$('loginerr').textContent=e.message;sessionStorage.removeItem(sessionKey);token=null;}}
@@ -380,6 +390,6 @@ function roleLabel(role){return ({superadmin:'Super Admin',admin:'Administrator'
 function formatMyanmar(value){if(!value)return '--';const d=new Date(value);if(Number.isNaN(d.getTime()))return String(value);return new Intl.DateTimeFormat('en-GB',{timeZone:'Asia/Yangon',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}).format(d)+' (MMT)'}
 $('compose').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send()}});$('password').addEventListener('keydown',e=>{if(e.key==='Enter')login()});$('login-2fa-code').addEventListener('keydown',e=>{if(e.key==='Enter')verifyLogin2FA()});window.addEventListener('focus',()=>{if(token&&$('inbox')&&!$('inbox').classList.contains('hidden'))renderInbox()});
 
-const adminLoginPath=location.pathname==='/superadmin-login';if(adminLoginPath){$('loginbrand').textContent='X-WALLET CHAT MANAGEMENT';document.title='X-WALLET CHAT MANAGEMENT';document.querySelector('#login .muted').textContent='Super Administrator · Secure Management Login'}if(employeeRoute){$('password').focus()}
+if(employeeRoute){$('password').focus()}
 if(token)init();
 </script></body></html>

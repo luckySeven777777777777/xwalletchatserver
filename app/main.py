@@ -6,7 +6,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
-from sqlalchemy import desc, text
+from sqlalchemy import desc, text, func
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from .db import Base, engine, get_db, SessionLocal
 from .models import User, Team, TgAccount, Customer, Assignment, Message, Tag, AuditLog, ReadState
@@ -45,7 +45,7 @@ with SessionLocal() as _migration_db:
         _user.public_id = make_public_user_id(_migration_db)
     _migration_db.commit()
 
-app = FastAPI(title='X-Wallet Chat Management', version='7.3.0')
+app = FastAPI(title='X-Wallet Chat Management', version='7.4.0')
 app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins.split(','), allow_credentials=False, allow_methods=['*'], allow_headers=['*'])
 app.mount('/static', StaticFiles(directory='static'), name='static')
 
@@ -109,7 +109,10 @@ def employee_login_link(username: str):
 
 @app.post('/api/auth/login')
 def login(data: LoginIn, db: Session = Depends(get_db)):
-    user = db.query(User).filter_by(username=data.username).first()
+    # Employee links may preserve mixed-case usernames. Resolve usernames
+    # case-insensitively and trim only the username (never the password).
+    submitted_username = data.username.strip()
+    user = db.query(User).filter(func.lower(User.username) == submitted_username.lower()).first()
 
     # Recovery path for the environment-configured bootstrap super administrator.
     # This only works when the submitted password exactly matches Railway's
@@ -124,7 +127,17 @@ def login(data: LoginIn, db: Session = Depends(get_db)):
     if configured_admin and not user.active:
         user.active = True
         db.commit()
-    if not user or not user.active or not verify_password(data.password, user.password_hash):
+    password_ok = False
+    if user is not None:
+        try:
+            password_ok = verify_password(data.password, user.password_hash)
+        except Exception as exc:
+            # Keep the public response generic, but leave a useful server-side
+            # diagnostic instead of silently treating a corrupt hash as a typo.
+            print(f"auth password verification error for user_id={user.id}: {type(exc).__name__}: {exc}")
+    if not user or not user.active or not password_ok:
+        reason = 'user_not_found' if user is None else ('account_inactive' if not user.active else 'password_mismatch')
+        print(f"auth rejected: username={submitted_username!r}; reason={reason}")
         # If the bootstrap credential is valid but its database hash was changed,
         # restore only this configured superadmin's password hash.
         if configured_admin:
@@ -132,7 +145,7 @@ def login(data: LoginIn, db: Session = Depends(get_db)):
             user.active = True
             db.commit()
         else:
-            raise HTTPException(401, 'Invalid username or password')
+            raise HTTPException(401, 'Invalid username or password. Ask an administrator to verify the account is active and reset its password if needed.')
     if user.totp_enabled:
         return {'requires_2fa': True, 'challenge_token': create_2fa_challenge(user.id), 'username': user.username}
     user.last_seen = datetime.now(timezone.utc); db.commit()
@@ -302,8 +315,10 @@ def create_user(data: UserIn, request: Request, db: Session = Depends(get_db), a
         raise HTTPException(400, 'Role must be admin, Chatting, or Finding')
     if len(data.password) < 10:
         raise HTTPException(400, 'Password must be at least 10 characters')
-    if db.query(User).filter_by(username=username).first():
-        raise HTTPException(409, 'Username already exists')
+    if len(data.password.encode('utf-8')) > 72:
+        raise HTTPException(400, 'Password must be no more than 72 UTF-8 bytes for the current password-hash algorithm')
+    if db.query(User).filter(func.lower(User.username) == username.lower()).first():
+        raise HTTPException(409, 'Username already exists (usernames are case-insensitive)')
     if data.team_id is not None and not db.get(Team, data.team_id):
         raise HTTPException(404, 'Team not found')
     try:
@@ -322,8 +337,9 @@ def create_user(data: UserIn, request: Request, db: Session = Depends(get_db), a
         print('employee creation failed:', repr(exc))
         raise HTTPException(500, 'Employee account could not be created. Check Railway application logs and database connectivity.') from exc
     audit(db, actor, 'user.create', 'user', u.id)
-    base_url = (os.getenv('APP_BASE_URL') or 'https://xwalletchatserver-production.up.railway.app').rstrip('/')
-    login_url = base_url + '/login/' + u.username
+    from urllib.parse import quote
+    base_url = (settings.app_base_url or 'https://xwalletchatserver-production.up.railway.app').rstrip('/')
+    login_url = base_url + '/login/' + quote(u.username, safe='')
     return {'id': u.id, 'public_id': u.public_id, 'username': u.username,
             'role': u.role, 'login_url': login_url, 'needs_custom_domain': False}
 
