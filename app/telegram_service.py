@@ -24,35 +24,57 @@ async def begin_login(phone: str):
     await client.connect()
     sent = await client.send_code_request(phone)
     key = sent.phone_code_hash
-    _pending[key] = {'client': client, 'phone': phone, 'phone_code_hash': key}
+    _pending[key] = {'client': client, 'phone': phone, 'phone_code_hash': key, 'stage': 'code'}
     return key
 
-async def finish_login(code_hash: str, code: str, password: str | None = None):
+async def finish_login(code_hash: str, code: str = '', password: str | None = None):
     item = _pending.get(code_hash)
-    if not item: raise ValueError('Login challenge expired. Start again.')
+    if not item:
+        raise ValueError('Telegram verification session expired or was lost. Click “发送验证码” again and use the newest code.')
     client = item['client']
     try:
-        if password:
+        # Telegram requires the one-time code first. Only after Telegram raises
+        # SessionPasswordNeededError may the 2FA password be submitted.
+        if item.get('stage') == 'password':
+            if not password:
+                return {'needs_password': True}
             await client.sign_in(password=password)
         else:
-            await client.sign_in(phone=item['phone'], code=code, phone_code_hash=item['phone_code_hash'])
+            await client.sign_in(
+                phone=item['phone'],
+                code=code,
+                phone_code_hash=item['phone_code_hash']
+            )
     except SessionPasswordNeededError:
-        return {'needs_password': True}
-    if not await client.is_user_authorized(): raise ValueError('Telegram authorization failed')
+        item['stage'] = 'password'
+        return {'needs_password': True, 'stage': 'password'}
+    if not await client.is_user_authorized():
+        raise ValueError('Telegram authorization did not complete. Check the code and try again.')
     me = await client.get_me()
     session = client.session.save()
     db = SessionLocal()
     try:
-        account = TgAccount(label=(me.first_name or 'Telegram') + (f' {me.last_name}' if me.last_name else ''), phone_masked=mask_phone(item['phone']), session_ciphertext=encrypt_session(session), status='connected')
-        db.add(account); db.commit(); db.refresh(account)
+        account = TgAccount(
+            label=(me.first_name or 'Telegram') + (f' {me.last_name}' if me.last_name else ''),
+            phone_masked=mask_phone(item['phone']),
+            session_ciphertext=encrypt_session(session),
+            status='connected'
+        )
+        db.add(account)
+        db.commit()
+        db.refresh(account)
         _clients[account.id] = client
         _pending.pop(code_hash, None)
         attach_handlers(account.id, client)
         asyncio.create_task(sync_dialogs(account.id, client))
         return {'account_id': account.id, 'label': account.label, 'phone_masked': account.phone_masked}
     except Exception:
-        db.rollback(); await client.disconnect(); raise
-    finally: db.close()
+        db.rollback()
+        await client.disconnect()
+        raise
+    finally:
+        db.close()
+
 
 def attach_handlers(account_id: int, client: TelegramClient):
     @client.on(events.NewMessage)

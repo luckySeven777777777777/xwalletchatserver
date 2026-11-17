@@ -1,6 +1,6 @@
 import asyncio, re
 from datetime import datetime, timezone
-from fastapi import FastAPI, Depends, HTTPException, Header, UploadFile, File
+from fastapi import FastAPI, Depends, HTTPException, Header, UploadFile, File, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -40,6 +40,11 @@ async def startup():
 
 @app.get('/')
 def home(): return FileResponse('static/index.html')
+
+@app.get('/login/{username}')
+def employee_login_link(username: str):
+    # A distinct employee login URL; it pre-fills the username but never grants access by itself.
+    return FileResponse('static/index.html')
 
 @app.post('/api/auth/login')
 def login(data: LoginIn, db: Session = Depends(get_db)):
@@ -85,11 +90,11 @@ def list_users(db: Session = Depends(get_db), actor: User = Depends(admin)):
     return [{'id':u.id,'username':u.username,'role':u.role,'team_id':u.team_id,'active':u.active,'created_at':u.created_at.isoformat(),'last_seen':u.last_seen.isoformat() if u.last_seen else None} for u in db.query(User).order_by(User.id).all()]
 
 @app.post('/api/admin/users')
-def create_user(data: UserIn, db: Session = Depends(get_db), actor: User = Depends(admin)):
+def create_user(data: UserIn, request: Request, db: Session = Depends(get_db), actor: User = Depends(admin)):
     if data.role not in ('admin','employee'): raise HTTPException(400,'Role must be admin or employee')
     if db.query(User).filter_by(username=data.username).first(): raise HTTPException(409,'Username already exists')
     if data.team_id and not db.get(Team,data.team_id): raise HTTPException(404,'Team not found')
-    u=User(username=data.username,password_hash=hash_password(data.password),role=data.role,team_id=data.team_id); db.add(u); db.commit(); db.refresh(u); audit(db,actor,'user.create','user',u.id); return {'id':u.id,'username':u.username}
+    u=User(username=data.username,password_hash=hash_password(data.password),role=data.role,team_id=data.team_id); db.add(u); db.commit(); db.refresh(u); audit(db,actor,'user.create','user',u.id); login_url=str(request.base_url).rstrip('/') + '/login/' + u.username; return {'id':u.id,'username':u.username,'role':u.role,'login_url':login_url}
 
 @app.patch('/api/admin/users/{uid}')
 def update_user(uid:int, active:bool, db:Session=Depends(get_db), actor:User=Depends(admin)):
@@ -121,6 +126,19 @@ def create_team(data:TeamIn, db:Session=Depends(get_db), actor:User=Depends(admi
 @app.get('/api/admin/teams')
 def list_teams(db:Session=Depends(get_db), actor:User=Depends(admin)):
     return [{'id':t.id,'name':t.name} for t in db.query(Team).all()]
+
+@app.patch('/api/admin/users/{uid}/team')
+def set_user_team(uid: int, data: dict, db: Session = Depends(get_db), actor: User = Depends(admin)):
+    user = db.get(User, uid)
+    if not user:
+        raise HTTPException(404, 'User not found')
+    team_id = data.get('team_id')
+    if team_id is not None and not db.get(Team, int(team_id)):
+        raise HTTPException(404, 'Team not found')
+    user.team_id = int(team_id) if team_id is not None else None
+    db.commit()
+    audit(db, actor, 'user.team_update', 'user', uid, f'team_id={user.team_id}')
+    return {'ok': True, 'team_id': user.team_id}
 
 @app.post('/api/admin/telegram/begin')
 async def telegram_begin(data:PhoneIn, actor:User=Depends(admin)):

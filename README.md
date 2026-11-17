@@ -70,3 +70,12 @@ Use two Telegram test accounts, one admin, and two employees:
 - Add robust per-account rate limiting and Telegram flood-wait handling.
 - Add websocket push for realtime UI (current UI refreshes on demand).
 - Add assignment quotas and daily reception counters with proper business timezone configuration.
+
+
+## v3 repair notes
+- Team list is loaded in the admin panel; new employees can be assigned to a team at creation, and existing users can be moved between teams.
+- Employee/admin creation returns a dedicated `/login/<username>` URL. The URL pre-fills the username only; the user must still enter their password.
+- Admin notices now use a centered in-app modal instead of browser alert/prompt dialogs.
+- Social platform logo assets are bundled locally under `static/logos/`; no external logo CDN is required.
+- Telegram authorization now submits the one-time code first. If Telegram requests 2-step verification, the second submission uses the password stage. Start a fresh code request if the in-memory challenge has expired or the Railway service restarted.
+- API validation errors now display the structured response details instead of `[object Object]`.
