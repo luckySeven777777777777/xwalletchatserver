@@ -1,4 +1,4 @@
-import asyncio, re, secrets, os, uuid, mimetypes, base64
+import asyncio, re, secrets, os, uuid, mimetypes, base64, hmac
 from datetime import datetime, timezone, timedelta
 from fastapi import FastAPI, Depends, HTTPException, Header, UploadFile, File, Form, Request
 from fastapi.responses import FileResponse
@@ -44,7 +44,7 @@ with SessionLocal() as _migration_db:
         _user.public_id = make_public_user_id(_migration_db)
     _migration_db.commit()
 
-app = FastAPI(title='Telegram CRM Management', version='1.0.0')
+app = FastAPI(title='X-Wallet Chat Management', version='6.2.0')
 app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins.split(','), allow_credentials=False, allow_methods=['*'], allow_headers=['*'])
 app.mount('/static', StaticFiles(directory='static'), name='static')
 
@@ -109,8 +109,29 @@ def employee_login_link(username: str):
 @app.post('/api/auth/login')
 def login(data: LoginIn, db: Session = Depends(get_db)):
     user = db.query(User).filter_by(username=data.username).first()
+
+    # Recovery path for the environment-configured bootstrap super administrator.
+    # This only works when the submitted password exactly matches Railway's
+    # ADMIN_PASSWORD; it cannot reactivate employee or ordinary admin accounts.
+    configured_admin = (
+        user is not None
+        and user.role == 'superadmin'
+        and data.username == settings.admin_username
+        and bool(settings.admin_password)
+        and hmac.compare_digest(data.password, settings.admin_password)
+    )
+    if configured_admin and not user.active:
+        user.active = True
+        db.commit()
     if not user or not user.active or not verify_password(data.password, user.password_hash):
-        raise HTTPException(401, 'Invalid username or password')
+        # If the bootstrap credential is valid but its database hash was changed,
+        # restore only this configured superadmin's password hash.
+        if configured_admin:
+            user.password_hash = hash_password(settings.admin_password)
+            user.active = True
+            db.commit()
+        else:
+            raise HTTPException(401, 'Invalid username or password')
     if user.totp_enabled:
         return {'requires_2fa': True, 'challenge_token': create_2fa_challenge(user.id), 'username': user.username}
     user.last_seen = datetime.now(timezone.utc); db.commit()
@@ -333,6 +354,51 @@ def admin_app_url(actor: User = Depends(admin)):
 @app.get('/api/admin/telegram/accounts')
 def telegram_accounts(db:Session=Depends(get_db), actor:User=Depends(admin)):
     return [{'id':a.id,'label':a.label,'phone_masked':a.phone_masked,'status':a.status,'created_at':utc_iso(a.created_at),'customer_count':db.query(Customer).filter_by(account_id=a.id).count()} for a in db.query(TgAccount).order_by(TgAccount.id).all()]
+
+@app.post('/api/admin/telegram/accounts/{account_id}/sync')
+async def admin_sync_telegram_account(account_id: int, db: Session = Depends(get_db), actor: User = Depends(admin)):
+    account = db.get(TgAccount, account_id)
+    if not account:
+        raise HTTPException(404, 'Telegram account not found')
+    client = tg._clients.get(account_id)
+    if not client or not client.is_connected():
+        raise HTTPException(409, 'Telegram account is not connected. Reconnect this account first.')
+    try:
+        await tg.sync_dialogs(account_id, client)
+    except Exception as exc:
+        raise HTTPException(502, f'Telegram sync failed: {exc}')
+    count = db.query(Customer).filter_by(account_id=account_id).count()
+    audit(db, actor, 'telegram.account.sync', 'telegram_account', account_id, f'customers={count}')
+    return {'ok': True, 'account_id': account_id, 'customer_count': count}
+
+@app.get('/api/admin/telegram/accounts/{account_id}/profile')
+async def admin_telegram_account_profile(account_id: int, actor: User = Depends(admin)):
+    client = tg._clients.get(account_id)
+    if not client or not client.is_connected():
+        raise HTTPException(409, 'Telegram account is not connected.')
+    me = await client.get_me()
+    name = ' '.join(filter(None, [getattr(me, 'first_name', ''), getattr(me, 'last_name', '')])).strip()
+    avatar_file = os.path.join(UPLOAD_ROOT, f'tg_account_{account_id}_avatar.jpg')
+    avatar_available = False
+    try:
+        saved = await client.download_profile_photo(me, file=avatar_file)
+        avatar_available = bool(saved)
+    except Exception:
+        pass
+    return {
+        'id': getattr(me, 'id', None),
+        'name': name or account_id,
+        'username': getattr(me, 'username', '') or '',
+        'phone': getattr(me, 'phone', '') or '',
+        'avatar_available': avatar_available
+    }
+
+@app.get('/api/admin/telegram/accounts/{account_id}/avatar')
+def admin_telegram_account_avatar(account_id: int, actor: User = Depends(admin)):
+    path = os.path.join(UPLOAD_ROOT, f'tg_account_{account_id}_avatar.jpg')
+    if not os.path.isfile(path):
+        raise HTTPException(404, 'Telegram account avatar is not available yet. Refresh account profile first.')
+    return FileResponse(path, media_type='image/jpeg')
 
 @app.get('/api/admin/customers')
 def admin_customers(account_id:int|None=None, db:Session=Depends(get_db), actor:User=Depends(admin)):

@@ -151,8 +151,19 @@ def attach_handlers(account_id: int, client: TelegramClient):
 async def sync_dialogs(account_id: int, client: TelegramClient):
     db = SessionLocal()
     try:
-        dialogs = await client.get_dialogs(limit=None)
-        for dialog in dialogs:
+        # Sync both the main chat list and Archived Chats. Telegram stores these
+        # in separate dialog folders, so reading only the default folder misses clients.
+        dialogs_by_peer = {}
+        for folder in (0, 1):
+            try:
+                folder_dialogs = await client.get_dialogs(limit=None, folder=folder)
+            except TypeError:
+                folder_dialogs = await client.get_dialogs(limit=None)
+                if folder == 1:
+                    break
+            for item in folder_dialogs:
+                dialogs_by_peer[str(item.id)] = item
+        for dialog in dialogs_by_peer.values():
             entity = dialog.entity
             if getattr(entity, 'bot', False) or not getattr(entity, 'id', None): continue
             peer_id = str(dialog.id)

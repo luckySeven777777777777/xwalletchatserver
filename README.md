@@ -135,3 +135,26 @@ Deploy the full updated project, not only `static/index.html`. The backend adds 
 
 - Added `/superadmin-login` as a management-branded login URL. Employee login links continue to use the employee-facing X-WALLET CHATTING branding.
 - Restricted self-service 2FA setup, confirmation and disable endpoints to administrator roles; employees cannot enable or alter 2FA through hidden API calls.
+
+
+## v6.2 hotfix (2026-11-18)
+
+This release addresses the issues reported after v6.1:
+
+- Sidebar navigation buttons now respect the `hidden` state; Chatting employees see only Chat Workspace and Logout, while Finding employees see Chat Workspace, Social Channels, and Logout. Admin navigation remains available only to administrator roles.
+- The main application and admin workspace use the full available viewport; chat panes are visually unified and use more compact typography.
+- A disabled bootstrap Super Admin can be recovered only with the matching Railway `ADMIN_USERNAME` and `ADMIN_PASSWORD` environment credentials. Set these variables in Railway before signing in again. The recovery path does not reactivate employee or ordinary administrator accounts.
+- Telegram sync now reads both the main dialog folder and Archived Chats. Admins can explicitly sync all dialogs for a selected Telegram account.
+- Admin Telegram account cards can retrieve and display the connected account's current Telegram profile name, username, phone, numeric Telegram ID, and profile photo.
+- Social Channels no longer uses an iframe that Telegram/Meta/TikTok may block. It provides official desktop-app protocol launch attempts where supported, plus official download/site links. A browser cannot embed or guarantee launching another vendor's desktop program; Windows/browser permission prompts may appear.
+
+### Important deployment notes
+
+1. Back up the Railway PostgreSQL database and keep the existing Railway Volume mounted at `/data`.
+2. Keep the existing `JWT_SECRET`, `SESSION_ENCRYPTION_KEY`, `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, and `DATABASE_URL` values unchanged.
+3. Confirm `UPLOAD_DIR=/data/uploads`.
+4. For the bootstrap Super Admin recovery, set `ADMIN_USERNAME` to the existing Super Admin username (for example `superadmin`) and set a new strong `ADMIN_PASSWORD` in Railway Variables. Do not paste these secrets into chat or commit them to source control. Redeploy, then sign in using those credentials.
+5. After deployment, sign in as an administrator, select each Telegram account, and click **Sync selected account**. Archived Chats are included. The sync imports dialog customers and up to the latest 1,000 messages per dialog; it can take time for accounts with many chats.
+6. Verify employee permissions using one Chatting account and one Finding account before assigning live customers.
+
+This release has Python and JavaScript syntax checks completed. Runtime integration tests against the live Railway database and Telegram accounts must still be performed after deployment.
