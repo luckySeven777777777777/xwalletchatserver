@@ -117,3 +117,21 @@ Use two Telegram test accounts, one admin, and two employees:
 
 ### Railway media persistence
 Create a Railway Volume mounted at `/data` and set the Railway variable `UPLOAD_DIR=/data/uploads`. Without a persistent volume, local uploaded media and cached Telegram photos can be lost when Railway replaces the container. Keep the existing `DATABASE_URL`, `JWT_SECRET`, and `SESSION_ENCRYPTION_KEY`; do not reset the PostgreSQL database or Telegram sessions.
+
+
+## v6.1 repair update (uploaded project patch)
+
+- Added account-scoped customer selection with visible per-customer checkboxes, select-all, bulk assign and bulk unassign controls. Bulk operations apply only to the currently selected Telegram account list; history is retained.
+- Added administrator-managed TOTP enrollment for employee accounts. The administrator displays a QR code, the target authenticator verifies a 6-digit code, and only then is 2FA enabled.
+- Added a superadmin-only reset endpoint for another account's 2FA. A reset clears the old authenticator binding; the account can sign in without 2FA until re-enrolled. A superadmin cannot reset their own authenticator through this endpoint and must use their own security settings.
+- Employee workspaces no longer show the 2FA settings control. Chatting employees see Chat Workbench and Logout; Finding employees additionally see Social Channels. Employee branding is `X-WALLET CHATTING`.
+- Compact chat typography and controls; attachment picker is limited to photos and videos; incoming voice/audio remains playable and Telegram's native forward operation supports message media. Emoji picker is collapsed until clicked; send action label is `Sent`.
+- Added animated layered background and glass-style panels, respecting reduced-motion preferences.
+- Social Channels remains an embedded iframe workspace. This does not guarantee that third-party sites permit embedding or protect credentials entered into those sites; use official apps or a managed enterprise integration for sensitive account access.
+
+## v6.1 deployment notes
+
+Deploy the full updated project, not only `static/index.html`. The backend adds three routes: `POST /api/admin/users/{uid}/2fa/setup`, `POST /api/admin/users/{uid}/2fa/confirm`, and `POST /api/admin/users/{uid}/2fa/reset`. Existing databases are updated in-place by the current startup migration; no table schema change is required for these routes. Keep the Railway Volume mounted at `/data` and set `UPLOAD_DIR=/data/uploads` if you want uploaded media to survive redeployments.
+
+- Added `/superadmin-login` as a management-branded login URL. Employee login links continue to use the employee-facing X-WALLET CHATTING branding.
+- Restricted self-service 2FA setup, confirmation and disable endpoints to administrator roles; employees cannot enable or alter 2FA through hidden API calls.

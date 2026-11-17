@@ -57,7 +57,7 @@ class TeamIn(BaseModel): name: str
 class PhoneIn(BaseModel): phone: str
 class CodeIn(BaseModel): phone_code_hash: str; code: str; password: str | None = None
 class AssignIn(BaseModel): customer_id: int; user_id: int
-class BulkAssignIn(BaseModel): customer_ids: list[int]; user_id: int
+class BulkAssignIn(BaseModel): customer_ids: list[int]; user_id: int; account_id: int
 class SendIn(BaseModel): text: str = Field(min_length=1, max_length=4096)
 class TagIn(BaseModel): key: str; value: str; scope: str = 'private'
 
@@ -97,6 +97,9 @@ async def startup():
 
 @app.get('/')
 def home(): return FileResponse('static/index.html')
+
+@app.get('/superadmin-login')
+def superadmin_login_page(): return FileResponse('static/index.html')
 
 @app.get('/login/{username}')
 def employee_login_link(username: str):
@@ -138,6 +141,10 @@ def admin(user: User = Depends(current_user)):
     if user.role not in ('superadmin','admin'): raise HTTPException(403,'Administrator only')
     return user
 
+def superadmin(user: User = Depends(current_user)):
+    if user.role != 'superadmin': raise HTTPException(403, 'Super administrator only')
+    return user
+
 def audit(db, actor, action, typ='', target='', detail=''):
     db.add(AuditLog(actor_user_id=actor.id if actor else None, action=action, target_type=typ, target_id=str(target), detail=detail)); db.commit()
 
@@ -166,7 +173,7 @@ def me(user: User = Depends(current_user)):
     return {'id':user.id,'public_id':user.public_id,'username':user.username,'role':user.role,'team_id':user.team_id,'totp_enabled':user.totp_enabled}
 
 @app.post('/api/security/2fa/setup')
-def setup_2fa(db: Session = Depends(get_db), user: User = Depends(current_user)):
+def setup_2fa(db: Session = Depends(get_db), user: User = Depends(admin)):
     if user.totp_enabled:
         raise HTTPException(409, '2FA is already enabled on this account.')
     secret = pyotp.random_base32()
@@ -182,7 +189,7 @@ def setup_2fa(db: Session = Depends(get_db), user: User = Depends(current_user))
     return {'secret':secret, 'otpauth_uri':uri, 'qr_data_uri':qr_data, 'account_label':account_label, 'issuer':'X-Wallet'}
 
 @app.post('/api/security/2fa/confirm')
-def confirm_2fa(data: TwoFactorCodeIn, db: Session = Depends(get_db), user: User = Depends(current_user)):
+def confirm_2fa(data: TwoFactorCodeIn, db: Session = Depends(get_db), user: User = Depends(admin)):
     if not user.totp_secret:
         raise HTTPException(400, 'Start 2FA setup first and scan the QR code.')
     if not pyotp.TOTP(decrypt_session(user.totp_secret)).verify(data.code.strip(), valid_window=1):
@@ -192,7 +199,7 @@ def confirm_2fa(data: TwoFactorCodeIn, db: Session = Depends(get_db), user: User
     return {'ok':True, 'totp_enabled':True}
 
 @app.post('/api/security/2fa/disable')
-def disable_2fa(data: TwoFactorCodeIn, db: Session = Depends(get_db), user: User = Depends(current_user)):
+def disable_2fa(data: TwoFactorCodeIn, db: Session = Depends(get_db), user: User = Depends(admin)):
     if not user.totp_enabled or not user.totp_secret:
         raise HTTPException(400, '2FA is not enabled.')
     if not pyotp.TOTP(decrypt_session(user.totp_secret)).verify(data.code.strip(), valid_window=1):
@@ -201,6 +208,55 @@ def disable_2fa(data: TwoFactorCodeIn, db: Session = Depends(get_db), user: User
     user.totp_secret = None
     db.commit()
     return {'ok':True, 'totp_enabled':False}
+
+@app.post('/api/admin/users/{uid}/2fa/setup')
+def admin_setup_user_2fa(uid: int, db: Session = Depends(get_db), actor: User = Depends(admin)):
+    target = db.get(User, uid)
+    if not target or not target.active:
+        raise HTTPException(404, 'Active user not found')
+    if target.role in ('admin', 'superadmin') and actor.role != 'superadmin':
+        raise HTTPException(403, 'Only the super administrator can manage administrator 2FA')
+    secret = pyotp.random_base32()
+    target.totp_secret = encrypt_session(secret)
+    target.totp_enabled = False
+    db.commit()
+    issuer = 'X-Wallet'
+    account_name = f'{issuer} ({target.username})'
+    uri = pyotp.TOTP(secret).provisioning_uri(name=target.username, issuer_name=issuer)
+    qr = qrcode.QRCode(box_size=6, border=3)
+    qr.add_data(uri); qr.make(fit=True)
+    image = qr.make_image(fill_color='black', back_color='white')
+    buffer = BytesIO(); image.save(buffer, format='PNG')
+    qr_data = 'data:image/png;base64,' + base64.b64encode(buffer.getvalue()).decode('ascii')
+    audit(db, actor, 'user.2fa.setup_started', 'user', uid)
+    return {'qr_data_uri': qr_data, 'secret': secret, 'account_label': account_name}
+
+@app.post('/api/admin/users/{uid}/2fa/confirm')
+def admin_confirm_user_2fa(uid: int, data: TwoFactorCodeIn, db: Session = Depends(get_db), actor: User = Depends(admin)):
+    target = db.get(User, uid)
+    if not target or not target.active or not target.totp_secret:
+        raise HTTPException(404, '2FA setup was not found for this active account')
+    if target.role in ('admin', 'superadmin') and actor.role != 'superadmin':
+        raise HTTPException(403, 'Only the super administrator can manage administrator 2FA')
+    if not pyotp.TOTP(decrypt_session(target.totp_secret)).verify(data.code.strip(), valid_window=1):
+        raise HTTPException(400, 'The 2FA code is incorrect. Scan the QR code and try again.')
+    target.totp_enabled = True
+    db.commit()
+    audit(db, actor, 'user.2fa.enabled', 'user', uid)
+    return {'ok': True, 'totp_enabled': True}
+
+@app.post('/api/admin/users/{uid}/2fa/reset')
+def admin_reset_user_2fa(uid: int, db: Session = Depends(get_db), actor: User = Depends(superadmin)):
+    target = db.get(User, uid)
+    if not target:
+        raise HTTPException(404, 'User not found')
+    if target.id == actor.id:
+        raise HTTPException(400, 'Use your own 2FA settings to change your super administrator authenticator')
+    target.totp_secret = None
+    target.totp_enabled = False
+    db.commit()
+    audit(db, actor, 'user.2fa.reset', 'user', uid)
+    return {'ok': True, 'totp_enabled': False, 'username': target.username}
 
 @app.get('/api/admin/users')
 def list_users(db: Session = Depends(get_db), actor: User = Depends(admin)):
@@ -307,6 +363,7 @@ def admin_customer_avatar(cid:int, db:Session=Depends(get_db), actor:User=Depend
 def assign(data:AssignIn, db:Session=Depends(get_db), actor:User=Depends(admin)):
     c=db.get(Customer,data.customer_id); u=db.get(User,data.user_id)
     if not c or not u or not u.active: raise HTTPException(404,'Customer or active user not found')
+    if u.role not in ('employee', 'chatting', 'finding'): raise HTTPException(400, 'Customers can only be assigned to Chatting or Finding employees')
     # Reassignment revokes old active assignments but never deletes history/messages/tags.
     old=db.query(Assignment).filter_by(customer_id=c.id,active=True).all()
     for a in old: a.active=False; a.revoked_at=datetime.now(timezone.utc)
@@ -316,6 +373,12 @@ def assign(data:AssignIn, db:Session=Depends(get_db), actor:User=Depends(admin))
 def bulk_assign(data:BulkAssignIn, db:Session=Depends(get_db), actor:User=Depends(admin)):
     u=db.get(User,data.user_id)
     if not u or not u.active: raise HTTPException(404,'Active user not found')
+    if u.role not in ('employee', 'chatting', 'finding'): raise HTTPException(400, 'Customers can only be assigned to Chatting or Finding employees')
+    if not data.customer_ids: raise HTTPException(400, 'Select at least one customer')
+    if len(data.customer_ids) > 500: raise HTTPException(400, 'Bulk assignment is limited to 500 customers at a time')
+    selected = db.query(Customer).filter(Customer.id.in_(data.customer_ids)).all()
+    if len(selected) != len(set(data.customer_ids)) or any(c.account_id != data.account_id for c in selected):
+        raise HTTPException(400, 'Every selected customer must belong to the currently selected Telegram account')
     for cid in data.customer_ids:
         c=db.get(Customer,cid)
         if not c: continue
