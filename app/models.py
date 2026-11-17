@@ -9,6 +9,8 @@ class User(Base):
     __tablename__ = 'users'
     id: Mapped[int] = mapped_column(primary_key=True)
     public_id: Mapped[str | None] = mapped_column(String(6), unique=True, nullable=True, index=True)
+    totp_secret: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    totp_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     username: Mapped[str] = mapped_column(String(80), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(255))
     role: Mapped[str] = mapped_column(String(20), default='employee')
@@ -42,6 +44,7 @@ class Customer(Base):
     real_name: Mapped[str] = mapped_column(String(255), default='')
     phone: Mapped[str] = mapped_column(String(80), default='')
     alias: Mapped[str] = mapped_column(String(120), default='')
+    avatar_path: Mapped[str] = mapped_column(String(500), default='')
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     __table_args__ = (UniqueConstraint('account_id','telegram_peer_id', name='uq_customer_peer'),)
 

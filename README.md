@@ -105,3 +105,15 @@ Use two Telegram test accounts, one admin, and two employees:
 - The employee login URL is intentionally set to the Railway host shown in the supplied screenshots: `https://xwalletchatserver-production.up.railway.app/login/<username>`.
 - Public account IDs are six-digit random values stored in `users.public_id`; they remain stable on subsequent logins and are backfilled for existing accounts on application startup.
 - Internal numeric user primary keys are retained only for database relations and API operations.
+
+
+## v6 feature set
+- Role-based navigation: Chatting users see Chat Workbench and Logout; Finding users see Chat Workbench, Social Channels and Logout. Admin roles retain the admin panel.
+- Yangon time: account timestamps are serialized as UTC and rendered in the browser with the `Asia/Yangon` time zone (MMT, UTC+06:30).
+- TOTP 2FA: self-service enrollment for every role, QR provisioning URI issuer `X-Wallet`, account label based on the user's login nickname, encrypted TOTP secret at rest, and mandatory one-time-code challenge on subsequent logins once enabled. Pending 2FA challenge tokens are rejected by normal authenticated API routes.
+- Chat attachments: photo/video/audio uploads are sent through the linked Telegram account; incoming Telegram media is downloaded for the CRM chat history. `.ogg` / `.opus` audio is sent as a Telegram voice note.
+- Telegram customers: admin-only account selector filters the customer list by Telegram account. Telegram display name, username, phone and profile photo are shown only in admin endpoints/pages. Employee inbox names remain masked and no profile-photo endpoint is exposed to employees.
+- Social Channels now load inside an iframe workspace rather than opening new tabs. Some providers intentionally block iframe embedding; this CRM cannot override those provider security headers. Use the official desktop application or an approved provider integration if an embedded page refuses to load.
+
+### Railway media persistence
+Create a Railway Volume mounted at `/data` and set the Railway variable `UPLOAD_DIR=/data/uploads`. Without a persistent volume, local uploaded media and cached Telegram photos can be lost when Railway replaces the container. Keep the existing `DATABASE_URL`, `JWT_SECRET`, and `SESSION_ENCRYPTION_KEY`; do not reset the PostgreSQL database or Telegram sessions.

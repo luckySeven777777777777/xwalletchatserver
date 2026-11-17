@@ -12,6 +12,10 @@ def verify_password(value: str, hashed: str) -> bool: return pwd.verify(value, h
 def create_token(user_id: int, role: str) -> str:
     exp = datetime.now(timezone.utc) + timedelta(hours=12)
     return jwt.encode({'sub': str(user_id), 'role': role, 'exp': exp}, settings.jwt_secret, algorithm=ALGORITHM)
+def create_2fa_challenge(user_id: int) -> str:
+    exp = datetime.now(timezone.utc) + timedelta(minutes=5)
+    return jwt.encode({'sub': str(user_id), 'purpose': '2fa_login', 'exp': exp}, settings.jwt_secret, algorithm=ALGORITHM)
+
 def decode_token(token: str):
     try: return jwt.decode(token, settings.jwt_secret, algorithms=[ALGORITHM])
     except JWTError: return None

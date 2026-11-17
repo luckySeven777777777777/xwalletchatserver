@@ -12,5 +12,6 @@ class Settings:
     admin_password: str = os.getenv("ADMIN_PASSWORD", "")
     app_base_url: str = os.getenv("APP_BASE_URL", os.getenv("PUBLIC_APP_URL", "https://xwalletchatserver-production.up.railway.app"))
     cors_origins: str = os.getenv("CORS_ORIGINS", "*")
+    upload_dir: str = os.getenv("UPLOAD_DIR", "./uploads")
 
 settings = Settings()

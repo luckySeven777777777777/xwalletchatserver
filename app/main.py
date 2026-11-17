@@ -1,6 +1,6 @@
-import asyncio, re, secrets
-from datetime import datetime, timezone
-from fastapi import FastAPI, Depends, HTTPException, Header, UploadFile, File, Request
+import asyncio, re, secrets, os, uuid, mimetypes, base64
+from datetime import datetime, timezone, timedelta
+from fastapi import FastAPI, Depends, HTTPException, Header, UploadFile, File, Form, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,9 +9,11 @@ from sqlalchemy.orm import Session
 from sqlalchemy import desc, text
 from .db import Base, engine, get_db, SessionLocal
 from .models import User, Team, TgAccount, Customer, Assignment, Message, Tag, AuditLog, ReadState
-from .security import hash_password, verify_password, create_token, decode_token
+from .security import hash_password, verify_password, create_token, decode_token, create_2fa_challenge, encrypt_session, decrypt_session
 from .config import settings
 from . import telegram_service as tg
+import pyotp, qrcode
+from io import BytesIO
 
 Base.metadata.create_all(bind=engine)
 
@@ -21,7 +23,14 @@ with engine.begin() as conn:
     columns = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(users)").fetchall()} if engine.dialect.name == "sqlite" else {row[0] for row in conn.exec_driver_sql("SELECT column_name FROM information_schema.columns WHERE table_name='users'").fetchall()}
     if "public_id" not in columns:
         conn.exec_driver_sql("ALTER TABLE users ADD COLUMN public_id VARCHAR(6)")
+    if "totp_secret" not in columns:
+        conn.exec_driver_sql("ALTER TABLE users ADD COLUMN totp_secret VARCHAR(64)")
+    if "totp_enabled" not in columns:
+        conn.exec_driver_sql("ALTER TABLE users ADD COLUMN totp_enabled BOOLEAN NOT NULL DEFAULT FALSE")
     conn.exec_driver_sql("CREATE UNIQUE INDEX IF NOT EXISTS ix_users_public_id ON users (public_id)")
+    customer_columns = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(customers)").fetchall()} if engine.dialect.name == "sqlite" else {row[0] for row in conn.exec_driver_sql("SELECT column_name FROM information_schema.columns WHERE table_name='customers'").fetchall()}
+    if "avatar_path" not in customer_columns:
+        conn.exec_driver_sql("ALTER TABLE customers ADD COLUMN avatar_path VARCHAR(500) NOT NULL DEFAULT ''")
 
 def make_public_user_id(db):
     for _ in range(200):
@@ -40,6 +49,9 @@ app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins.split(','
 app.mount('/static', StaticFiles(directory='static'), name='static')
 
 class LoginIn(BaseModel): username: str; password: str
+class TwoFactorVerifyIn(BaseModel): challenge_token: str; code: str
+class TwoFactorCodeIn(BaseModel): code: str
+class ForwardIn(BaseModel): target_customer_id: int
 class UserIn(BaseModel): username: str; password: str = Field(min_length=10); role: str = 'chatting'; team_id: int | None = None
 class TeamIn(BaseModel): name: str
 class PhoneIn(BaseModel): phone: str
@@ -48,6 +60,30 @@ class AssignIn(BaseModel): customer_id: int; user_id: int
 class BulkAssignIn(BaseModel): customer_ids: list[int]; user_id: int
 class SendIn(BaseModel): text: str = Field(min_length=1, max_length=4096)
 class TagIn(BaseModel): key: str; value: str; scope: str = 'private'
+
+UPLOAD_ROOT = os.path.abspath(settings.upload_dir)
+os.makedirs(UPLOAD_ROOT, exist_ok=True)
+MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+ALLOWED_MEDIA_EXTENSIONS = {'.jpg','.jpeg','.png','.gif','.webp','.bmp','.heic','.tif','.tiff','.mp4','.mov','.m4v','.webm','.mkv','.avi','.mpg','.mpeg','.mp3','.m4a','.ogg','.oga','.opus','.wav','.aac','.flac','.aiff','.3gp'}
+
+def utc_iso(value):
+    if value is None: return None
+    if value.tzinfo is None: value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat()
+
+def media_kind(path):
+    mime = mimetypes.guess_type(path or '')[0] or ''
+    if mime.startswith('image/'): return 'image'
+    if mime.startswith('video/'): return 'video'
+    if mime.startswith('audio/'): return 'audio'
+    return 'file'
+
+def safe_upload_path(relative):
+    root_path = os.path.realpath(UPLOAD_ROOT)
+    full = os.path.realpath(os.path.join(root_path, relative or ''))
+    if not full.startswith(root_path + os.sep) or not os.path.isfile(full):
+        raise HTTPException(404, 'Media file not found')
+    return full
 
 @app.on_event('startup')
 async def startup():
@@ -70,14 +106,30 @@ def employee_login_link(username: str):
 @app.post('/api/auth/login')
 def login(data: LoginIn, db: Session = Depends(get_db)):
     user = db.query(User).filter_by(username=data.username).first()
-    if not user or not user.active or not verify_password(data.password, user.password_hash): raise HTTPException(401, 'Invalid username or password')
+    if not user or not user.active or not verify_password(data.password, user.password_hash):
+        raise HTTPException(401, 'Invalid username or password')
+    if user.totp_enabled:
+        return {'requires_2fa': True, 'challenge_token': create_2fa_challenge(user.id), 'username': user.username}
     user.last_seen = datetime.now(timezone.utc); db.commit()
-    return {'token': create_token(user.id,user.role), 'user': {'id':user.id,'public_id':user.public_id,'username':user.username,'role':user.role,'team_id':user.team_id}}
+    return {'token': create_token(user.id,user.role), 'user': {'id':user.id,'public_id':user.public_id,'username':user.username,'role':user.role,'team_id':user.team_id,'totp_enabled':user.totp_enabled}}
+
+@app.post('/api/auth/2fa/verify')
+def verify_login_2fa(data: TwoFactorVerifyIn, db: Session = Depends(get_db)):
+    payload = decode_token(data.challenge_token)
+    if not payload or payload.get('purpose') != '2fa_login':
+        raise HTTPException(401, 'Two-factor login challenge expired. Please sign in again.')
+    user = db.get(User, int(payload['sub']))
+    if not user or not user.active or not user.totp_enabled or not user.totp_secret:
+        raise HTTPException(401, 'Two-factor account is unavailable.')
+    if not pyotp.TOTP(decrypt_session(user.totp_secret)).verify(data.code.strip(), valid_window=1):
+        raise HTTPException(401, 'Invalid 2FA code. Check the code and try again.')
+    user.last_seen = datetime.now(timezone.utc); db.commit()
+    return {'token': create_token(user.id,user.role), 'user': {'id':user.id,'public_id':user.public_id,'username':user.username,'role':user.role,'team_id':user.team_id,'totp_enabled':True}}
 
 def current_user(authorization: str | None = Header(default=None), db: Session = Depends(get_db)):
     if not authorization or not authorization.startswith('Bearer '): raise HTTPException(401,'Login required')
     payload = decode_token(authorization[7:])
-    if not payload: raise HTTPException(401,'Invalid or expired session')
+    if not payload or payload.get('purpose') is not None: raise HTTPException(401,'Invalid or expired session')
     user = db.get(User, int(payload['sub']))
     if not user or not user.active: raise HTTPException(401,'Account disabled')
     return user
@@ -93,8 +145,15 @@ def can_access(db: Session, user: User, customer_id: int):
     if user.role in ('superadmin','admin'): return True
     return db.query(Assignment).filter_by(customer_id=customer_id,user_id=user.id,active=True).first() is not None
 
-def safe_customer(c: Customer):
-    return {'id':c.id,'alias':c.alias or f'Customer-{c.id:05d}','created_at':c.created_at.isoformat()}
+def safe_customer(c: Customer, user: User | None = None):
+    admin_view = user is not None and user.role in ('superadmin','admin')
+    if admin_view:
+        label = c.real_name or (('@'+c.real_username) if c.real_username else '') or c.phone or c.alias or 'Telegram User'
+        if label.startswith('Customer-'):
+            label = 'Telegram User'
+    else:
+        label = f'Customer-{c.id:05d}'
+    return {'id':c.id,'alias':label,'created_at':utc_iso(c.created_at)}
 
 def redact(text: str):
     # Best-effort privacy filter. It cannot reliably identify all personal data, names, photos, voice notes or vCards.
@@ -104,11 +163,48 @@ def redact(text: str):
 
 @app.get('/api/me')
 def me(user: User = Depends(current_user)):
-    return {'id':user.id,'public_id':user.public_id,'username':user.username,'role':user.role,'team_id':user.team_id}
+    return {'id':user.id,'public_id':user.public_id,'username':user.username,'role':user.role,'team_id':user.team_id,'totp_enabled':user.totp_enabled}
+
+@app.post('/api/security/2fa/setup')
+def setup_2fa(db: Session = Depends(get_db), user: User = Depends(current_user)):
+    if user.totp_enabled:
+        raise HTTPException(409, '2FA is already enabled on this account.')
+    secret = pyotp.random_base32()
+    user.totp_secret = encrypt_session(secret)
+    db.commit()
+    account_label = f"X-Wallet · {user.username}"
+    uri = pyotp.TOTP(secret).provisioning_uri(name=user.username, issuer_name='X-Wallet')
+    qr = qrcode.QRCode(box_size=6, border=3)
+    qr.add_data(uri); qr.make(fit=True)
+    image = qr.make_image(fill_color='black', back_color='white')
+    buffer = BytesIO(); image.save(buffer, format='PNG')
+    qr_data = 'data:image/png;base64,' + base64.b64encode(buffer.getvalue()).decode('ascii')
+    return {'secret':secret, 'otpauth_uri':uri, 'qr_data_uri':qr_data, 'account_label':account_label, 'issuer':'X-Wallet'}
+
+@app.post('/api/security/2fa/confirm')
+def confirm_2fa(data: TwoFactorCodeIn, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    if not user.totp_secret:
+        raise HTTPException(400, 'Start 2FA setup first and scan the QR code.')
+    if not pyotp.TOTP(decrypt_session(user.totp_secret)).verify(data.code.strip(), valid_window=1):
+        raise HTTPException(400, 'The 2FA code is incorrect. Please scan the QR code and try again.')
+    user.totp_enabled = True
+    db.commit()
+    return {'ok':True, 'totp_enabled':True}
+
+@app.post('/api/security/2fa/disable')
+def disable_2fa(data: TwoFactorCodeIn, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    if not user.totp_enabled or not user.totp_secret:
+        raise HTTPException(400, '2FA is not enabled.')
+    if not pyotp.TOTP(decrypt_session(user.totp_secret)).verify(data.code.strip(), valid_window=1):
+        raise HTTPException(400, 'Invalid 2FA code.')
+    user.totp_enabled = False
+    user.totp_secret = None
+    db.commit()
+    return {'ok':True, 'totp_enabled':False}
 
 @app.get('/api/admin/users')
 def list_users(db: Session = Depends(get_db), actor: User = Depends(admin)):
-    return [{'id':u.id,'public_id':u.public_id,'username':u.username,'role':u.role,'team_id':u.team_id,'active':u.active,'created_at':u.created_at.isoformat(),'last_seen':u.last_seen.isoformat() if u.last_seen else None} for u in db.query(User).order_by(User.id).all()]
+    return [{'id':u.id,'public_id':u.public_id,'username':u.username,'role':u.role,'team_id':u.team_id,'active':u.active,'totp_enabled':u.totp_enabled,'created_at':u.created_at.isoformat(),'last_seen':u.last_seen.isoformat() if u.last_seen else None} for u in db.query(User).order_by(User.id).all()]
 
 @app.post('/api/admin/users')
 def create_user(data: UserIn, request: Request, db: Session = Depends(get_db), actor: User = Depends(admin)):
@@ -180,11 +276,32 @@ def admin_app_url(actor: User = Depends(admin)):
 
 @app.get('/api/admin/telegram/accounts')
 def telegram_accounts(db:Session=Depends(get_db), actor:User=Depends(admin)):
-    return [{'id':a.id,'label':a.label,'phone_masked':a.phone_masked,'status':a.status,'created_at':a.created_at.isoformat(),'customer_count':db.query(Customer).filter_by(account_id=a.id).count()} for a in db.query(TgAccount).order_by(TgAccount.id).all()]
+    return [{'id':a.id,'label':a.label,'phone_masked':a.phone_masked,'status':a.status,'created_at':utc_iso(a.created_at),'customer_count':db.query(Customer).filter_by(account_id=a.id).count()} for a in db.query(TgAccount).order_by(TgAccount.id).all()]
 
 @app.get('/api/admin/customers')
-def admin_customers(db:Session=Depends(get_db), actor:User=Depends(admin)):
-    return [{'id':c.id,'alias':c.alias,'telegram_username':c.real_username,'telegram_user_id':c.telegram_peer_id,'name':c.real_name,'phone':c.phone,'account_id':c.account_id,'assigned_to':[{'user_id':db.get(User,a.user_id).public_id if db.get(User,a.user_id) else None,'username':db.get(User,a.user_id).username if db.get(User,a.user_id) else 'Unknown'} for a in db.query(Assignment).filter_by(customer_id=c.id,active=True).all()]} for c in db.query(Customer).all()]
+def admin_customers(account_id:int|None=None, db:Session=Depends(get_db), actor:User=Depends(admin)):
+    q=db.query(Customer)
+    if account_id is not None:
+        q=q.filter(Customer.account_id==account_id)
+    rows=q.order_by(Customer.account_id, Customer.real_name, Customer.real_username).all()
+    result=[]
+    for c in rows:
+        assigned=[]
+        for a in db.query(Assignment).filter_by(customer_id=c.id,active=True).all():
+            u=db.get(User,a.user_id)
+            if u: assigned.append({'user_id':u.public_id,'username':u.username})
+        result.append({'id':c.id,'alias':c.alias or c.real_name or ('@'+c.real_username if c.real_username else 'Telegram User'),
+            'telegram_username':c.real_username,'telegram_user_id':c.telegram_peer_id,'name':c.real_name,
+            'phone':c.phone,'account_id':c.account_id,'avatar_available':bool(c.avatar_path),
+            'assigned_to':assigned})
+    return result
+
+@app.get('/api/admin/customers/{cid}/avatar')
+def admin_customer_avatar(cid:int, db:Session=Depends(get_db), actor:User=Depends(admin)):
+    c=db.get(Customer,cid)
+    if not c or not c.avatar_path: raise HTTPException(404,'Telegram profile photo is not available')
+    path=safe_upload_path(c.avatar_path)
+    return FileResponse(path, media_type=mimetypes.guess_type(path)[0] or 'image/jpeg')
 
 @app.post('/api/admin/assign')
 def assign(data:AssignIn, db:Session=Depends(get_db), actor:User=Depends(admin)):
@@ -228,7 +345,7 @@ def inbox(filter:str='all', db:Session=Depends(get_db), user:User=Depends(curren
             unread=db.query(Message).filter(Message.customer_id==c.id,Message.direction=='in',Message.id>last_read).count()
         if filter=='unread' and unread==0: continue
         if filter=='unreplied' and (not last or last.direction!='in'): continue
-        result.append({**safe_customer(c),'last_message':redact(last.body)[:180] if last else '', 'last_message_at':last.sent_at.isoformat() if last else None,'unread':unread,'account_id':c.account_id})
+        result.append({**safe_customer(c,user),'last_message':redact(last.body)[:180] if last else '', 'last_message_at':last.sent_at.isoformat() if last else None,'unread':unread,'account_id':c.account_id})
     return sorted(result,key=lambda x:x['last_message_at'] or '',reverse=True)
 
 @app.get('/api/customers/{cid}/messages')
@@ -239,7 +356,15 @@ def messages(cid:int, limit:int=200, before:int|None=None, db:Session=Depends(ge
     if before: q=q.filter(Message.id<before)
     rows=q.order_by(desc(Message.id)).limit(min(max(limit,1),500)).all()[::-1]
     # Never serialize Telegram IDs, peer IDs, usernames, phone numbers or access hashes to employees.
-    return [{'id':m.id,'direction':m.direction,'text':redact(m.body) if user.role not in ('admin','superadmin') else m.body,'sent_at':m.sent_at.isoformat(),'sender':m.sender_label,'media_available':bool(m.media_path)} for m in rows]
+    return [{'id':m.id,'direction':m.direction,'text':redact(m.body) if user.role not in ('admin','superadmin') else m.body,'sent_at':utc_iso(m.sent_at),'sender':m.sender_label,'media_available':bool(m.media_path),'media_kind':media_kind(m.media_path) if m.media_path else None} for m in rows]
+
+@app.get('/api/messages/{mid}/media')
+def message_media(mid:int, db:Session=Depends(get_db), user:User=Depends(current_user)):
+    msg=db.get(Message,mid)
+    if not msg or not can_access(db,user,msg.customer_id) or not msg.media_path:
+        raise HTTPException(404,'Media not found')
+    path=safe_upload_path(msg.media_path)
+    return FileResponse(path, media_type=mimetypes.guess_type(path)[0] or 'application/octet-stream')
 
 @app.post('/api/customers/{cid}/send')
 async def send(cid:int,data:SendIn, db:Session=Depends(get_db), user:User=Depends(current_user)):
@@ -247,8 +372,59 @@ async def send(cid:int,data:SendIn, db:Session=Depends(get_db), user:User=Depend
     if not c or not can_access(db,user,cid): raise HTTPException(404,'Customer not found')
     try: sent=await tg.send_message(c.account_id,c,data.text)
     except Exception as e: raise HTTPException(400,str(e))
-    m=Message(customer_id=cid,telegram_message_id=str(sent.id),direction='out',body=data.text,sent_at=sent.date,sender_label=user.username); db.add(m); db.commit(); db.refresh(m)
-    return {'ok':True,'message':{'id':m.id,'direction':'out','text':m.body,'sent_at':m.sent_at.isoformat(),'sender':m.sender_label}}
+    m=db.query(Message).filter_by(customer_id=cid,telegram_message_id=str(sent.id)).first()
+    if not m:
+        m=Message(customer_id=cid,telegram_message_id=str(sent.id),direction='out',body=data.text,sent_at=sent.date or datetime.now(timezone.utc),sender_label=user.username)
+        db.add(m); db.commit(); db.refresh(m)
+    return {'ok':True,'message':{'id':m.id,'direction':'out','text':m.body,'sent_at':utc_iso(m.sent_at),'sender':m.sender_label}}
+
+@app.post('/api/customers/{cid}/upload')
+async def upload_customer_media(cid:int, file:UploadFile=File(...), caption:str=Form(''),
+                                db:Session=Depends(get_db), user:User=Depends(current_user)):
+    c=db.get(Customer,cid)
+    if not c or not can_access(db,user,cid): raise HTTPException(404,'Customer not found')
+    ext=os.path.splitext(file.filename or '')[1].lower()
+    if ext not in ALLOWED_MEDIA_EXTENSIONS:
+        raise HTTPException(415,'Only photos, videos, and audio/voice files are supported.')
+    content=await file.read(MAX_UPLOAD_BYTES+1)
+    if not content: raise HTTPException(400,'The selected file is empty.')
+    if len(content)>MAX_UPLOAD_BYTES: raise HTTPException(413,'File is larger than the 50 MB limit.')
+    filename=f"upload_{uuid.uuid4().hex}{ext}"
+    full=os.path.join(UPLOAD_ROOT,filename)
+    with open(full,'wb') as target: target.write(content)
+    try:
+        sent=await tg.send_media(c.account_id,c,full,caption.strip())
+        rel=os.path.relpath(full,UPLOAD_ROOT)
+        msg=Message(customer_id=cid,telegram_message_id=str(sent.id),direction='out',body=caption.strip(),
+                    media_path=rel,sent_at=sent.date or datetime.now(timezone.utc),sender_label=user.username)
+        db.add(msg); db.commit(); db.refresh(msg)
+        return {'ok':True,'message_id':msg.id}
+    except Exception as exc:
+        try: os.remove(full)
+        except OSError: pass
+        raise HTTPException(400,str(exc))
+
+@app.post('/api/messages/{mid}/forward')
+async def forward_chat_message(mid:int, data:ForwardIn, db:Session=Depends(get_db), user:User=Depends(current_user)):
+    source_msg=db.get(Message,mid)
+    if not source_msg or not can_access(db,user,source_msg.customer_id):
+        raise HTTPException(404,'Source message not found')
+    source=db.get(Customer,source_msg.customer_id)
+    target=db.get(Customer,data.target_customer_id)
+    if not target or not can_access(db,user,target.id):
+        raise HTTPException(404,'Target customer not found')
+    if source.account_id != target.account_id:
+        raise HTTPException(400,'Messages can only be forwarded between customers connected to the same Telegram account.')
+    try:
+        sent=await tg.forward_message(source.account_id,source,target,source_msg.telegram_message_id)
+        row=Message(customer_id=target.id,telegram_message_id=str(sent.id),direction='out',
+                    body=source_msg.body,media_path=source_msg.media_path,
+                    sent_at=sent.date or datetime.now(timezone.utc),sender_label=user.username)
+        if not db.query(Message).filter_by(customer_id=target.id,telegram_message_id=str(sent.id)).first():
+            db.add(row);db.commit()
+        return {'ok':True,'target_customer_id':target.id}
+    except Exception as exc:
+        raise HTTPException(400,str(exc))
 
 @app.post('/api/customers/{cid}/read')
 def mark_read(cid:int, db:Session=Depends(get_db), user:User=Depends(current_user)):

@@ -31,9 +31,34 @@ button.danger{background:#b83a45}
 .chatlayout{grid-template-columns:270px minmax(400px,1fr) 270px;gap:14px}
 .list,.messages,.profile{padding:14px}
 #compose{margin:10px 0 8px;min-height:76px}
-@media(max-width:850px){.layout{grid-template-columns:1fr}.side{display:flex;gap:5px;overflow:auto}.side h2{display:none}.side button{white-space:nowrap;width:auto}.chatlayout{grid-template-columns:1fr;height:auto}.list,.messages,.profile{max-height:50vh}}
-</style></head><body><div id="login" class="card" style="max-width:420px;margin:8vh auto"><h1 id="loginbrand">X-WALLET SERVER</h1><p class="muted">公司客服系统 · 独立员工登录</p><label>用户名</label><input id="username" autocomplete="username"><label>密码</label><input id="password" type="password" autocomplete="current-password"><button onclick="login()">登录</button><p id="loginerr" class="muted"></p></div>
-<div id="app" class="layout hidden"><aside class="side"><h2 id="brandname">X-WALLET SERVER</h2><button id="inboxnav" onclick="show('inbox')">💬 聊天工作台</button><button id="adminnav" onclick="show('admin')">⚙ 管理后台</button><button id="channelsnav" onclick="show('channels')">🔗 社交平台快捷入口</button><button id="logoutnav" onclick="logout()">退出登录</button><p id="who" class="muted"></p></aside><main class="main"><div class="main-top"><div id="userpill" class="user-pill"></div></div><section id="inbox"><h1>聊天工作台</h1><div class="row"><input id="search" placeholder="搜索客户编号 / 昵称" oninput="renderInbox()"><select id="filter" onchange="renderInbox()"><option value="all">全部</option><option value="unread">未读</option><option value="unreplied">未回</option></select></div><div class="chatlayout"><div class="list" id="inboxlist"></div><div class="messages"><div id="chathead">选择一个客户</div><div id="messages" style="height:48vh;overflow:auto"></div><textarea id="compose" placeholder="输入消息..." rows="3"></textarea><button onclick="send()">发送</button></div><div class="profile"><h3>Customer Profile</h3><p class="muted">Shared customer information · English fields</p><div id="tags"></div>
+@media(max-width:850px){.channel-frame-wrap{min-height:420px;height:65vh}.top-actions{justify-content:flex-start}.customer-filter{max-width:100%}.layout{grid-template-columns:1fr}.side{display:flex;gap:5px;overflow:auto}.side h2{display:none}.side button{white-space:nowrap;width:auto}.chatlayout{grid-template-columns:1fr;height:auto}.list,.messages,.profile{max-height:50vh}}
+
+.chat-tools{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:6px 0}
+.chat-tools button{margin:0}
+.emoji-panel{display:flex;flex-wrap:wrap;gap:6px;padding:10px;background:#252a32;border:1px solid #3d4654;border-radius:10px;margin:6px 0}
+.emoji-panel button{background:#303844;padding:6px 9px;min-width:38px}
+.media-preview{display:block;max-width:min(320px,100%);max-height:260px;border-radius:10px;margin-top:8px}
+.bubble audio{width:min(320px,100%);display:block;margin-top:8px}
+.bubble video{max-width:min(360px,100%);max-height:280px;border-radius:10px;margin-top:8px}
+.customer-row{display:flex;align-items:center;gap:12px}
+.customer-avatar{width:42px;height:42px;border-radius:50%;object-fit:cover;background:#343a45;flex:none}
+.channel-frame-wrap{height:calc(100vh - 220px);min-height:520px;background:#15171b;border:1px solid #3a404a;border-radius:12px;overflow:hidden}
+.channel-frame{width:100%;height:100%;border:0;background:#fff}
+.twofa-qr{width:220px;height:220px;display:block;background:#fff;padding:10px;border-radius:10px;margin:12px 0}
+.customer-filter{max-width:320px;margin:0}
+.top-actions{display:flex;align-items:center;justify-content:flex-end;gap:10px;flex-wrap:wrap}
+#twofa-step{display:none}
+</style></head><body><div id="login" class="card" style="max-width:420px;margin:8vh auto"><h1 id="loginbrand">X-WALLET SERVER</h1><p class="muted">公司客服系统 · 独立员工登录</p><label>用户名</label><input id="username" autocomplete="username"><label>密码</label><input id="password" type="password" autocomplete="current-password"><button id="login-button" onclick="login()">登录</button><div id="twofa-step"><label>Google Authenticator 验证码</label><input id="login-2fa-code" inputmode="numeric" autocomplete="one-time-code" placeholder="输入 6 位验证码"><button onclick="verifyLogin2FA()">验证并登录</button></div><p id="loginerr" class="muted"></p></div>
+<div id="app" class="layout hidden"><aside class="side"><h2 id="brandname">X-WALLET SERVER</h2><button id="inboxnav" onclick="show('inbox')">💬 聊天工作台</button><button id="adminnav" onclick="show('admin')">⚙ 管理后台</button><button id="channelsnav" onclick="show('channels')">🔗 社交平台快捷入口</button><button id="logoutnav" onclick="logout()">退出登录</button><p id="who" class="muted"></p></aside><main class="main"><div class="main-top"><div class="top-actions"><button id="securitybtn" class="secondary" onclick="open2FASettings()">🔐 2FA 安全设置</button><div id="userpill" class="user-pill"></div></div></div><section id="inbox"><h1>聊天工作台</h1><div class="row"><input id="search" placeholder="搜索客户编号 / 昵称" oninput="renderInbox()"><select id="filter" onchange="renderInbox()"><option value="all">全部</option><option value="unread">未读</option><option value="unreplied">未回</option></select></div><div class="chatlayout"><div class="list" id="inboxlist"></div><div class="messages"><div id="chathead">选择一个客户</div><div id="messages" style="height:48vh;overflow:auto"></div><textarea id="compose" placeholder="输入消息..." rows="3"></textarea>
+<div class="chat-tools">
+ <input id="attach-file" type="file" accept="image/*,video/*,audio/*,.ogg,.opus,.m4a,.3gp" class="hidden" onchange="sendAttachment()">
+ <button type="button" class="secondary" onclick="$('attach-file').click()">📎 上传照片 / 视频 / 语音</button>
+ <button type="button" class="secondary" onclick="toggleEmoji()">😊 Emoji</button>
+ <button type="button" onclick="send()">发送文字</button>
+</div>
+<div id="emoji-panel" class="emoji-panel hidden">
+ <button onclick="insertEmoji('😀')">😀</button><button onclick="insertEmoji('😂')">😂</button><button onclick="insertEmoji('😍')">😍</button><button onclick="insertEmoji('🥰')">🥰</button><button onclick="insertEmoji('😉')">😉</button><button onclick="insertEmoji('😊')">😊</button><button onclick="insertEmoji('😎')">😎</button><button onclick="insertEmoji('👍')">👍</button><button onclick="insertEmoji('🙏')">🙏</button><button onclick="insertEmoji('❤️')">❤️</button><button onclick="insertEmoji('🔥')">🔥</button><button onclick="insertEmoji('🎉')">🎉</button><button onclick="insertEmoji('💯')">💯</button><button onclick="insertEmoji('🤝')">🤝</button>
+</div></div><div class="profile"><h3>Customer Profile</h3><p class="muted">Shared customer information · English fields</p><div id="tags"></div>
 <div class="profile-field"><label>Nickname</label><input id="profile-nickname" placeholder="Customer nickname"></div>
 <div class="profile-field"><label>Age</label><input id="profile-age" type="number" min="18" max="120" placeholder="Age"></div>
 <div class="profile-field"><label>Retired</label><select id="profile-retired"><option value="">Not specified</option><option>Yes</option><option>No</option></select></div>
@@ -43,14 +68,19 @@ button.danger{background:#b83a45}
 <div class="profile-field"><label>Location</label><input id="profile-location" placeholder="City, State / Country"></div>
 <button onclick="saveCustomerProfile()">Save Customer Profile</button>
 <div class="modal-note">Only record information voluntarily provided by the customer. Leave unknown fields as Not specified.</div></div></div></section>
-<section id="admin" class="hidden"><h1>超级管理员 / 管理后台</h1><div id="adminstatus" class="api-status hidden"></div><div class="grid"><div class="card"><h3>创建员工 / 管理员</h3><input id="newuser" placeholder="用户名"><input id="newpass" type="password" placeholder="初始密码（至少10位）"><select id="newrole"><option value="chatting">Chatting Employee</option><option value="finding">Finding Employee</option><option value="admin">Administrator</option></select><select id="newteam"><option value="">不加入团队</option></select><p class="muted">Employee initial password must be at least 10 characters.</p><button onclick="createUser()">创建账号</button></div><div class="card"><h3>创建团队</h3><input id="teamname" placeholder="团队名称"><button onclick="createTeam()">创建团队</button></div><div class="card"><h3>连接 Telegram 个人账号</h3><input id="phone" placeholder="国际格式手机号，例如 +1... 或 +95..."><button onclick="beginTelegram()">发送验证码</button><input id="codehash" placeholder="验证码挑战（自动填入）"><input id="code" placeholder="Telegram 验证码"><input id="tgpassword" type="password" placeholder="两步验证密码（如有）"><button onclick="completeTelegram()">完成授权</button><p class="muted">验证码只在后端登录流程中使用；Session 加密保存。</p></div><div class="card"><h3>账号与统计</h3><button class="secondary" onclick="loadAdmin()">刷新管理数据</button><pre id="stats" class="muted"></pre></div></div><div class="card"><h3>团队管理</h3><div id="teams"><p class="muted">暂无团队</p></div></div><div class="card"><h3>员工账号</h3><div id="users"></div></div><div class="card"><h3>Telegram 客户（管理员可见真实资料）</h3><div id="customers"></div></div><div class="card"><h3>Telegram 连接账号</h3><div id="accounts"></div></div></section>
-<section id="channels" class="hidden"><h1>Social Channels</h1><p class="muted">以下为外部网页快捷入口，不会将这些平台的消息同步到 Telegram CRM。</p><div class="grid">
-<div class="card"><h3 class="social-title"><img class="brand-logo" src="/static/logos/telegram.svg" alt="Telegram logo">Telegram Web</h3><p class="muted">第一阶段完整客服功能请使用本系统 Telegram 授权。</p><button onclick="openUrl('https://web.telegram.org/')">打开 Telegram</button></div>
-<div class="card"><h3 class="social-title"><img class="brand-logo" src="/static/logos/whatsapp.svg" alt="WhatsApp logo">WhatsApp Web</h3><button onclick="openUrl('https://web.whatsapp.com/')">打开 WhatsApp</button></div>
-<div class="card"><h3 class="social-title"><img class="brand-logo" src="/static/logos/instagram.svg" alt="Instagram logo">Instagram</h3><button onclick="openUrl('https://www.instagram.com/')">打开 Instagram</button></div>
-<div class="card"><h3 class="social-title"><img class="brand-logo" src="/static/logos/tiktok.svg" alt="TikTok logo">TikTok</h3><button onclick="openUrl('https://www.tiktok.com/')">打开 TikTok</button></div>
-<div class="card"><h3 class="social-title"><img class="brand-logo" src="/static/logos/line.svg" alt="LINE logo">LINE</h3><button onclick="openUrl('https://line.me/')">打开 LINE</button></div>
-</div></section></main></div>
+<section id="admin" class="hidden"><h1>超级管理员 / 管理后台</h1><div id="adminstatus" class="api-status hidden"></div><div class="grid"><div class="card"><h3>创建员工 / 管理员</h3><input id="newuser" placeholder="用户名"><input id="newpass" type="password" placeholder="初始密码（至少10位）"><select id="newrole"><option value="chatting">Chatting Employee</option><option value="finding">Finding Employee</option><option value="admin">Administrator</option></select><select id="newteam"><option value="">不加入团队</option></select><p class="muted">Employee initial password must be at least 10 characters.</p><button onclick="createUser()">创建账号</button></div><div class="card"><h3>创建团队</h3><input id="teamname" placeholder="团队名称"><button onclick="createTeam()">创建团队</button></div><div class="card"><h3>连接 Telegram 个人账号</h3><input id="phone" placeholder="国际格式手机号，例如 +1... 或 +95..."><button onclick="beginTelegram()">发送验证码</button><input id="codehash" placeholder="验证码挑战（自动填入）"><input id="code" placeholder="Telegram 验证码"><input id="tgpassword" type="password" placeholder="两步验证密码（如有）"><button onclick="completeTelegram()">完成授权</button><p class="muted">验证码只在后端登录流程中使用；Session 加密保存。</p></div><div class="card"><h3>账号与统计</h3><button class="secondary" onclick="loadAdmin()">刷新管理数据</button><pre id="stats" class="muted"></pre><hr><h3>🔐 账号双重验证（2FA）</h3><p class="muted">超级管理员、管理员和员工均可绑定 Google Authenticator。</p><button onclick="open2FASettings()">设置当前账号 2FA</button></div></div><div class="card"><h3>团队管理</h3><div id="teams"><p class="muted">暂无团队</p></div></div><div class="card"><h3>员工账号</h3><div id="users"></div></div><div class="card"><div class="row" style="align-items:center"><h3>Telegram 客户（管理员可见真实资料）</h3><select id="customer-account-filter" class="customer-filter" onchange="loadAdminCustomers()"><option value="">选择 Telegram 账号</option></select></div><div id="customers"></div></div><div class="card"><h3>Telegram 连接账号</h3><div id="accounts"></div></div></section>
+<section id="channels" class="hidden"><h1>Social Channels</h1>
+<p class="muted">平台在当前系统工作区内加载，不会主动打开新的浏览器标签页。部分平台会禁止 iframe 嵌入；如页面拒绝加载，需要使用平台官方桌面应用或允许嵌入的企业集成。</p>
+<div class="row" style="margin-bottom:12px">
+ <button onclick="loadChannel('https://web.telegram.org/','Telegram Web')">Telegram</button>
+ <button onclick="loadChannel('https://web.whatsapp.com/','WhatsApp Web')">WhatsApp</button>
+ <button onclick="loadChannel('https://www.instagram.com/','Instagram')">Instagram</button>
+ <button onclick="loadChannel('https://www.tiktok.com/','TikTok')">TikTok</button>
+ <button onclick="loadChannel('https://line.me/','LINE')">LINE</button>
+</div>
+<div id="channel-title" class="muted">请选择一个平台</div>
+<div class="channel-frame-wrap"><iframe id="channel-frame" class="channel-frame" title="Social platform workspace" referrerpolicy="no-referrer" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox"></iframe></div>
+</section></main></div>
 <div id="appmodal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="modal-title">
   <div class="modal-panel">
     <div class="modal-top"><div class="modal-mark" id="modal-mark">✓</div><button class="modal-x" onclick="closeModal()" aria-label="关闭">×</button></div>
@@ -60,10 +90,10 @@ button.danger{background:#b83a45}
   </div>
 </div>
 <script>
-let token=localStorage.getItem('crm_token'), me=null, activeCustomer=null, customers=[];const $=id=>document.getElementById(id);
+let token=localStorage.getItem('crm_token'), me=null, activeCustomer=null, customers=[], pending2FA=null, mediaObjectUrls=[];const $=id=>document.getElementById(id);
 async function api(path,opts={}){
  const method=(opts.method||'GET').toUpperCase(); let r;
- try { r=await fetch('/api'+path,{...opts,headers:{'Content-Type':'application/json',...(token?{Authorization:'Bearer '+token}:{}),...(opts.headers||{})}}); }
+ try { r=await fetch('/api'+path,{...opts,headers:{...(opts.body instanceof FormData?{}:{'Content-Type':'application/json'}),...(token?{Authorization:'Bearer '+token}:{}),...(opts.headers||{})}}); }
  catch(e){ throw Error(`网络连接失败：${method} /api${path}。请检查服务是否正常运行。${e.message||''}`); }
  const raw=await r.text(); let d={}; try{d=raw?JSON.parse(raw):{};}catch{d={raw};}
  if(!r.ok){let detail=d.detail??d.message??d.raw??r.statusText??'Unknown error';if(typeof detail!=='string')detail=JSON.stringify(detail);throw Error(`${method} /api${path} [HTTP ${r.status}]：${detail}`);}
@@ -71,7 +101,16 @@ async function api(path,opts={}){
 }
 function setAdminStatus(message,ok=false){const el=$('adminstatus');if(!el)return;el.textContent=message;el.classList.remove('hidden','ok');if(ok)el.classList.add('ok');}
 
-async function login(){try{let d=await api('/auth/login',{method:'POST',body:JSON.stringify({username:$('username').value,password:$('password').value})});token=d.token;localStorage.setItem('crm_token',token);await init()}catch(e){$('loginerr').textContent=e.message}}
+async function login(){try{
+ const d=await api('/auth/login',{method:'POST',body:JSON.stringify({username:$('username').value,password:$('password').value})});
+ if(d.requires_2fa){pending2FA=d.challenge_token;$('twofa-step').style.display='block';$('login-2fa-code').focus();$('loginerr').textContent='请输入 Google Authenticator 当前显示的 6 位验证码。';return;}
+ token=d.token;localStorage.setItem('crm_token',token);await init();
+ }catch(e){$('loginerr').textContent=e.message}}
+async function verifyLogin2FA(){try{
+ if(!pending2FA)return;
+ const d=await api('/auth/2fa/verify',{method:'POST',body:JSON.stringify({challenge_token:pending2FA,code:$('login-2fa-code').value.trim()})});
+ pending2FA=null;token=d.token;localStorage.setItem('crm_token',token);await init();
+ }catch(e){$('loginerr').textContent=e.message}}
 async function init(){try{
  me=await api('/me');$('login').classList.add('hidden');$('app').classList.remove('hidden');
  const isAdmin=['superadmin','admin'].includes(me.role), isFinding=me.role==='finding';
@@ -79,6 +118,8 @@ async function init(){try{
  $('userpill').innerHTML=`<span>User ID: ${esc(me.public_id||'------')}</span><span>${roleLabel(me.role)}</span>`;
  $('adminnav').classList.toggle('hidden',!isAdmin);
  $('channelsnav').classList.toggle('hidden',!(isAdmin||isFinding));
+ $('who').classList.toggle('hidden',!isAdmin);
+ $('securitybtn').classList.toggle('hidden',false);
  $('brandname').textContent=isAdmin?'X-WALLET CHAT MANAGEMENT':'X-WALLET SERVER';
  document.title=isAdmin?'X-WALLET CHAT MANAGEMENT':'X-WALLET SERVER';
  show('inbox');await renderInbox();
@@ -87,8 +128,46 @@ async function init(){try{
 function logout(){localStorage.removeItem('crm_token');token=null;location.reload()}
 function show(id){const isAdmin=me&&['superadmin','admin'].includes(me.role);const isFinding=me&&me.role==='finding';if(id==='admin'&&!isAdmin)id='inbox';if(id==='channels'&&!isAdmin&&!isFinding)id='inbox';['inbox','admin','channels'].forEach(x=>$(x).classList.toggle('hidden',x!==id));if(id==='admin')loadAdmin();if(id==='inbox')renderInbox()}
 async function renderInbox(){try{let f=$('filter').value;customers=await api('/inbox?filter='+f);let q=$('search').value.toLowerCase();customers=customers.filter(c=>(c.alias+' '+c.id).toLowerCase().includes(q));$('inboxlist').innerHTML=customers.map(c=>`<div class="item" onclick="openCustomer(${c.id})"><b>${esc(c.alias)}</b><div class="muted">${esc(c.last_message||'')}</div><small class="muted">${c.unread?c.unread+' 未读':''}</small></div>`).join('')||'<p class="muted">暂无已分配客户</p>'}catch(e){showModal('操作失败',e.message,true)}}
-async function openCustomer(id){activeCustomer=id;let c=customers.find(x=>x.id===id);$('chathead').textContent=c?.alias||('Customer '+id);let ms=await api('/customers/'+id+'/messages');$('messages').innerHTML=ms.map(m=>`<div class="bubble ${m.direction==='out'?'out':''}"><div>${esc(m.text||'[Media message]')}</div><small class="muted">${formatMyanmar(m.sent_at)}</small></div>`).join('');$('messages').scrollTop=$('messages').scrollHeight;await api('/customers/'+id+'/read',{method:'POST'});await loadTags()}
+async function renderMessageList(ms){
+ mediaObjectUrls.forEach(u=>URL.revokeObjectURL(u));mediaObjectUrls=[];
+ $('messages').innerHTML=ms.map(m=>`<div class="bubble ${m.direction==='out'?'out':''}"><div>${esc(m.text||'')}</div><div id="media-${m.id}"></div><small class="muted">${formatMyanmar(m.sent_at)} · ${esc(m.sender||'')}</small><div class="chat-tools"><button class="secondary" onclick="forwardMessage(${m.id})">↗ Forward</button></div></div>`).join('');
+ for(const msg of ms){if(!msg.media_available)continue;try{
+  const response=await fetch('/api/messages/'+msg.id+'/media',{headers:{Authorization:'Bearer '+token}});
+  if(!response.ok)continue;
+  const blob=await response.blob(), url=URL.createObjectURL(blob);mediaObjectUrls.push(url);
+  const target=$('media-'+msg.id);if(!target)continue;
+  if(msg.media_kind==='image')target.innerHTML=`<img class="media-preview" src="${url}" alt="Photo attachment">`;
+  else if(msg.media_kind==='video')target.innerHTML=`<video class="media-preview" src="${url}" controls playsinline></video>`;
+  else if(msg.media_kind==='audio')target.innerHTML=`<audio src="${url}" controls></audio>`;
+  else target.innerHTML=`<a href="${url}" target="_blank" rel="noopener">Open attachment</a>`;
+ }catch(e){console.warn('media preview failed',e)}}
+ $('messages').scrollTop=$('messages').scrollHeight;
+}
+async function openCustomer(id){activeCustomer=id;let c=customers.find(x=>x.id===id);$('chathead').textContent=c?.alias||('Customer '+id);let ms=await api('/customers/'+id+'/messages');await renderMessageList(ms);await api('/customers/'+id+'/read',{method:'POST'});await loadTags()}
 async function send(){if(!activeCustomer)return;let text=$('compose').value.trim();if(!text)return;try{await api('/customers/'+activeCustomer+'/send',{method:'POST',body:JSON.stringify({text})});$('compose').value='';await openCustomer(activeCustomer);await renderInbox()}catch(e){showModal('Send failed',e.message,true)}}
+async function sendAttachment(){
+ if(!activeCustomer)return showModal('请选择客户','请先从左侧选择一个客户。',true);
+ const input=$('attach-file'),file=input.files[0];if(!file)return;
+ const caption=$('compose').value.trim();const form=new FormData();form.append('file',file);form.append('caption',caption);
+ try{
+  const response=await fetch('/api/customers/'+activeCustomer+'/upload',{method:'POST',headers:{Authorization:'Bearer '+token},body:form});
+  const raw=await response.text();let data={};try{data=raw?JSON.parse(raw):{}}catch{}
+  if(!response.ok)throw Error(data.detail||'Upload failed');
+  input.value='';$('compose').value='';await openCustomer(activeCustomer);await renderInbox();
+ }catch(e){showModal('媒体发送失败',e.message,true);input.value=''}
+}
+async function forwardMessage(messageId){
+ const source=customers.find(c=>c.id===activeCustomer);
+ const targets=customers.filter(c=>c.id!==activeCustomer && source && c.account_id===source.account_id);
+ if(!targets.length)return showModal('没有可转发的客户','当前 Telegram 账号下没有其他可访问的客户。',true);
+ showModal('Forward message','选择同一个 Telegram 账号下的目标客户。',false,
+  '<label>转发到</label><select id="forward-target">'+targets.map(c=>`<option value="${c.id}">${esc(c.alias)}</option>`).join('')+'</select>');
+ $('modal-confirm').textContent='转发';
+ $('modal-confirm').onclick=async()=>{try{await api('/messages/'+messageId+'/forward',{method:'POST',body:JSON.stringify({target_customer_id:Number($('forward-target').value)})});showModal('转发成功','消息已转发到所选 Telegram 客户。');}catch(e){showModal('转发失败',e.message,true)}};
+}
+function toggleEmoji(){$('emoji-panel').classList.toggle('hidden')}
+function insertEmoji(emoji){const box=$('compose');box.value+=emoji;box.focus()}
+
 const profileFields={'Nickname':'profile-nickname','Age':'profile-age','Retired':'profile-retired','Currently Working':'profile-working','Current Job Title / Occupation':'profile-job','Marital Status':'profile-single','Living Alone':'profile-alone','Location':'profile-location'};
 async function loadTags(){let tags=await api('/customers/'+activeCustomer+'/tags');const byKey={};tags.forEach(t=>byKey[t.key]=t);Object.entries(profileFields).forEach(([key,id])=>{const el=$(id);if(el)el.value=byKey[key]?.value||'';});$('tags').innerHTML=tags.filter(t=>!profileFields[t.key]).map(t=>`<div class="card"><b>${esc(t.key)}</b>: ${esc(t.value)}</div>`).join('')}
 async function saveCustomerProfile(){if(!activeCustomer)return showModal('Select a customer','Choose a customer from the chat list first.',true);try{for(const [key,id] of Object.entries(profileFields)){const value=$(id).value.trim();await api('/customers/'+activeCustomer+'/tags',{method:'POST',body:JSON.stringify({key,value,scope:'shared'})});}await loadTags();showModal('Customer profile saved','The profile is saved as shared customer information and will be visible to authorized employees assigned to this customer.')}catch(e){showModal('Save failed',e.message,true)}}
@@ -121,7 +200,7 @@ function closeModal(){$('appmodal').classList.add('hidden');$('modal-extra').inn
 
 async function loadAdmin(){
  setAdminStatus('正在读取管理后台数据…');
- const specs=[['员工账号','/admin/users'],['团队列表','/admin/teams'],['Telegram 客户','/admin/customers'],['Telegram 连接账号','/admin/telegram/accounts'],['统计数据','/admin/stats'],['系统诊断','/admin/diagnostics']];
+ const specs=[['员工账号','/admin/users'],['团队列表','/admin/teams'],['Telegram 连接账号','/admin/telegram/accounts'],['统计数据','/admin/stats'],['系统诊断','/admin/diagnostics']];
  const settled=await Promise.allSettled(specs.map(x=>api(x[1]))); const data={}; const errors=[];
  settled.forEach((r,i)=>{if(r.status==='fulfilled')data[specs[i][0]]=r.value;else errors.push(`${specs[i][0]}：${r.reason.message}`)});
  if(data['统计数据'])$('stats').textContent=JSON.stringify(data['统计数据'],null,2);
@@ -131,16 +210,35 @@ async function loadAdmin(){
   $('teams').innerHTML=teams.map(t=>`<div class="team-row"><b>${esc(t.name)}</b><span class="muted">Team ID: ${t.id}</span></div>`).join('')||'<p class="muted">暂无团队</p>';
   $('newteam').innerHTML='<option value="">不加入团队</option>'+teams.map(t=>`<option value="${t.id}">${esc(t.name)}</option>`).join('');
  }
- if(data['员工账号'])$('users').innerHTML=data['员工账号'].map(u=>`<div class="user-line"><b>${esc(u.username)}</b> · ${roleLabel(u.role)} · ${u.active?'Active':'Disabled'} · User ID ${u.public_id||'------'} · Team ${u.team_id??'--'}<div class="user-actions"><button onclick="toggleUser(${u.id},${!u.active})">${u.active?'Disable':'Enable'}</button><button onclick="resetUserPassword(${u.id},'${esc(u.username)}')">Reset Password</button><button onclick="changeUserTeam(${u.id},${u.team_id??'null'})">Change Team</button><button onclick="showLoginLink('${esc(u.username)}')">Login Link</button></div></div>`).join('')||'<p class="muted">No employee accounts</p>';
- if(data['Telegram 客户']){
-  const employeeChoices=(data['员工账号']||[]).filter(u=>u.active && ['employee','chatting','finding'].includes(u.role));
-  $('customers').innerHTML=data['Telegram 客户'].map(c=>{
-   const assigned=(c.assigned_to||[]).map(a=>`${esc(a.username)} (User ID ${a.user_id})`).join(', ')||'Unassigned';
-   return `<div class="item"><b>${esc(c.alias)}</b> · @${esc(c.telegram_username||'')} · Telegram ID ${esc(c.telegram_user_id)} · Phone ${esc(c.phone||'--')}<div class="muted">Assigned to: <b>${assigned}</b></div><div class="assign-actions"><select id="assign-${c.id}"><option value="">Select employee account</option>${employeeChoices.map(u=>`<option value="${u.id}">${esc(u.username)} · User ID ${u.public_id||'------'} · ${u.role}</option>`).join('')}</select><button onclick="assignCustomer(${c.id})">Assign</button><button class="danger" onclick="revokeCustomer(${c.id})">Unassign</button></div></div>`;
-  }).join('')||'<p class="muted">No Telegram customers yet. Connect an account and wait for sync.</p>';
+ if(data['员工账号'])$('users').innerHTML=data['员工账号'].map(u=>`<div class="user-line"><b>${esc(u.username)}</b> · ${roleLabel(u.role)} · ${u.active?'Active':'Disabled'} · User ID ${u.public_id||'------'} · 2FA ${u.totp_enabled?'Enabled':'Not bound'} · Team ${u.team_id??'--'}<div class="user-actions"><button onclick="toggleUser(${u.id},${!u.active})">${u.active?'Disable':'Enable'}</button><button onclick="resetUserPassword(${u.id},'${esc(u.username)}')">Reset Password</button><button onclick="changeUserTeam(${u.id},${u.team_id??'null'})">Change Team</button><button onclick="showLoginLink('${esc(u.username)}')">Login Link</button></div></div>`).join('')||'<p class="muted">No employee accounts</p>';
+ if(data['Telegram 连接账号']){
+  const selector=$('customer-account-filter'), previous=selector.value;
+  selector.innerHTML='<option value="">请选择 Telegram 账号</option>'+data['Telegram 连接账号'].map(a=>`<option value="${a.id}">${esc(a.label)} · Account #${a.id}</option>`).join('');
+  if(previous && data['Telegram 连接账号'].some(a=>String(a.id)===previous))selector.value=previous;
+  else if(data['Telegram 连接账号'].length)selector.value=String(data['Telegram 连接账号'][0].id);
+  await loadAdminCustomers();
  }
  if(data['Telegram 连接账号'])$('accounts').innerHTML=data['Telegram 连接账号'].map(a=>`<div class="account-card"><b>Telegram Account #${a.id}</b><div class="meta">Account name: ${esc(a.label)}<br>Phone: ${esc(a.phone_masked)}<br>Status: <span class="account-status ${a.status==='connected'?'':'offline'}">${esc(a.status)}</span><br>Synced customers: ${a.customer_count??0}<br>Connected: ${formatMyanmar(a.created_at)}</div></div>`).join('')||'<p class="muted">No Telegram personal account connected</p>';
  if(errors.length){setAdminStatus('部分管理接口请求失败：\n'+errors.join('\n'));}else if(!data['系统诊断']){setAdminStatus('管理数据已加载，但系统诊断不可用。');}
+}
+async function loadAdminCustomers(){
+ const selector=$('customer-account-filter');if(!selector)return;
+ const account=selector.value;
+ if(!account){$('customers').innerHTML='<p class="muted">请先选择一个 Telegram 连接账号。</p>';return;}
+ try{
+  const data=await api('/admin/customers?account_id='+encodeURIComponent(account));
+  const employeeChoices=(await api('/admin/users')).filter(u=>u.active && ['employee','chatting','finding'].includes(u.role));
+  $('customers').innerHTML=data.map(c=>{
+   const displayName=c.name||(c.alias && !/^Customer-\d+/i.test(c.alias) && c.alias!=='@'+(c.telegram_username||'')?c.alias:'Telegram User');
+   const username=c.telegram_username?'@'+c.telegram_username:'';
+   const assigned=(c.assigned_to||[]).map(a=>`${esc(a.username)} (User ID ${a.user_id})`).join(', ')||'Unassigned';
+   return `<div class="item"><div class="customer-row"><img id="customer-avatar-${c.id}" class="customer-avatar" alt="Telegram avatar" src="/static/logos/telegram.svg"><div><b>${esc(displayName)}</b> ${username?`· ${esc(username)}`:''}<div class="muted">Phone: ${esc(c.phone||'--')} · Account #${c.account_id}</div><div class="muted">Assigned to: <b>${assigned}</b></div></div></div><div class="assign-actions"><select id="assign-${c.id}"><option value="">Select employee account</option>${employeeChoices.map(u=>`<option value="${u.id}">${esc(u.username)} · User ID ${u.public_id||'------'} · ${u.role}</option>`).join('')}</select><button onclick="assignCustomer(${c.id})">Assign</button><button class="danger" onclick="revokeCustomer(${c.id})">Unassign</button></div></div>`;
+  }).join('')||'<p class="muted">此 Telegram 账号目前没有客户。</p>';
+  for(const c of data){if(!c.avatar_available)continue;try{
+   const r=await fetch('/api/admin/customers/'+c.id+'/avatar',{headers:{Authorization:'Bearer '+token}});
+   if(r.ok){const blob=await r.blob(),url=URL.createObjectURL(blob);const img=$('customer-avatar-'+c.id);if(img)img.src=url;}
+  }catch(e){console.warn('avatar preview failed',e)}}
+ }catch(e){$('customers').innerHTML='<p class="muted">'+esc(e.message)+'</p>'}
 }
 async function toggleUser(id,active){try{await api('/admin/users/'+id+'?active='+active,{method:'PATCH'});await loadAdmin();showModal('账号状态已更新',active?'账号已恢复启用。':'账号已禁用。')}catch(e){showModal('操作失败',e.message,true)}}
 function resetUserPassword(id,username){
@@ -158,7 +256,25 @@ async function showLoginLink(username){const path='/login/'+encodeURIComponent(u
 async function assignCustomer(id){const selected=$('assign-'+id).value;if(!selected)return showModal('Select an employee','Choose a Chatting or Finding employee before assigning this customer.',true);try{const result=await api('/admin/assign',{method:'POST',body:JSON.stringify({customer_id:id,user_id:Number(selected)})});await loadAdmin();showModal('Customer assigned',`Customer #${id} is now assigned to ${result.username} (User ID ${result.public_user_id||result.user_id}). The employee can refresh the Chat Workspace to see the customer.`)}catch(e){showModal('Assignment failed',e.message,true)}}
 async function revokeCustomer(id){try{await api('/admin/revoke/'+id,{method:'POST'});await loadAdmin();showModal('Assignment removed','The customer is no longer assigned. Chat history has been preserved.')}catch(e){showModal('Operation failed',e.message,true)}}
 async function beginTelegram(){try{let d=await api('/admin/telegram/begin',{method:'POST',body:JSON.stringify({phone:$('phone').value.trim()})});$('codehash').value=d.phone_code_hash;$('code').value='';$('tgpassword').value='';showModal('验证码已发送','请在 Telegram 官方客户端或短信中查看最新验证码，然后先填写验证码并点击「完成授权」。')}catch(e){showModal('发送验证码失败',e.message,true)}}
-async function completeTelegram(){try{let d=await api('/admin/telegram/complete',{method:'POST',body:JSON.stringify({phone_code_hash:$('codehash').value.trim(),code:$('code').value.trim(),password:$('tgpassword').value||null})});if(d.needs_password){showModal('需要 Telegram 两步验证','验证码已验证。现在请输入 Telegram 两步验证密码，再次点击「完成授权」。');return;}showModal('Telegram 账号连接成功',`账号：${d.label||''} · ${d.phone_masked||''}。系统已保存加密 Session，正在后台同步会话。`);$('code').value='';$('tgpassword').value='';await loadAdmin()}catch(e){showModal('Telegram 授权失败',e.message,true)}}function openUrl(url){window.open(url,'_blank','noopener,noreferrer')}function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+async function completeTelegram(){try{let d=await api('/admin/telegram/complete',{method:'POST',body:JSON.stringify({phone_code_hash:$('codehash').value.trim(),code:$('code').value.trim(),password:$('tgpassword').value||null})});if(d.needs_password){showModal('需要 Telegram 两步验证','验证码已验证。现在请输入 Telegram 两步验证密码，再次点击「完成授权」。');return;}showModal('Telegram 账号连接成功',`账号：${d.label||''} · ${d.phone_masked||''}。系统已保存加密 Session，正在后台同步会话。`);$('code').value='';$('tgpassword').value='';await loadAdmin()}catch(e){showModal('Telegram 授权失败',e.message,true)}}async function open2FASettings(){
+ try{
+  const status=await api('/me');
+  if(status.totp_enabled){
+   showModal('2FA 已启用','此账号登录时必须输入 Google Authenticator 的 6 位动态验证码。',false,
+    '<label>当前验证码</label><input id="disable-2fa-code" inputmode="numeric" placeholder="输入 6 位验证码"><p class="modal-note">只有在你确认要关闭保护时才使用关闭功能。</p>');
+   $('modal-confirm').textContent='关闭 2FA';
+   $('modal-confirm').onclick=async()=>{try{await api('/security/2fa/disable',{method:'POST',body:JSON.stringify({code:$('disable-2fa-code').value.trim()})});showModal('2FA 已关闭','下次登录将不再要求动态验证码。')}catch(e){showModal('操作失败',e.message,true)}};
+   return;
+  }
+  const setup=await api('/security/2fa/setup',{method:'POST'});
+  showModal('绑定 Google Authenticator','使用 Google Authenticator 扫描二维码。账户名称会显示为 X-Wallet + 当前账号昵称。',false,
+   `<img class="twofa-qr" src="${setup.qr_data_uri}" alt="2FA QR code"><p>账户：${esc(setup.account_label)}</p><p>手动密钥：<b>${esc(setup.secret)}</b></p><label>输入 App 中的 6 位验证码完成绑定</label><input id="confirm-2fa-code" inputmode="numeric" placeholder="000000">`);
+  $('modal-confirm').textContent='确认绑定';
+  $('modal-confirm').onclick=async()=>{try{await api('/security/2fa/confirm',{method:'POST',body:JSON.stringify({code:$('confirm-2fa-code').value.trim()})});showModal('2FA 绑定成功','从下一次登录开始，必须输入 Google Authenticator 的 6 位动态验证码。')}catch(e){showModal('绑定失败',e.message,true)}};
+ }catch(e){showModal('2FA 设置失败',e.message,true)}
+}
+function loadChannel(url,title){$('channel-title').textContent=title+' · 当前系统工作区';$('channel-frame').src=url;}
+function openUrl(url){loadChannel(url,'Social Channel')}function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 
 function roleLabel(role){return ({superadmin:'Super Admin',admin:'Administrator',chatting:'Chatting Employee',finding:'Finding Employee',employee:'Chatting Employee'})[role]||role}
 function formatMyanmar(value){if(!value)return '--';const d=new Date(value);if(Number.isNaN(d.getTime()))return String(value);return new Intl.DateTimeFormat('en-GB',{timeZone:'Asia/Yangon',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}).format(d)+' (MMT)'}
