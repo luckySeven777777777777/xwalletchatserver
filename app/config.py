@@ -10,7 +10,7 @@ class Settings:
     telegram_api_hash: str = os.getenv("TELEGRAM_API_HASH", "")
     admin_username: str = os.getenv("ADMIN_USERNAME", "admin")
     admin_password: str = os.getenv("ADMIN_PASSWORD", "")
-    app_base_url: str = os.getenv("APP_BASE_URL", "")
+    app_base_url: str = os.getenv("APP_BASE_URL", os.getenv("PUBLIC_APP_URL", ""))
     cors_origins: str = os.getenv("CORS_ORIGINS", "*")
 
 settings = Settings()

@@ -79,3 +79,15 @@ Use two Telegram test accounts, one admin, and two employees:
 - Social platform logo assets are bundled locally under `static/logos/`; no external logo CDN is required.
 - Telegram authorization now submits the one-time code first. If Telegram requests 2-step verification, the second submission uses the password stage. Start a fresh code request if the in-memory challenge has expired or the Railway service restarted.
 - API validation errors now display the structured response details instead of `[object Object]`.
+
+
+## v4 repair notes (role, assignment, time and profile)
+- Added employee account types `chatting` and `finding`. Chatting employees see Chat Workspace and Logout only; Finding employees also see Social Channels; admin and superadmin retain all sections.
+- Added User ID identity pill to the upper-right of every signed-in page and IDs in the administrator employee list.
+- Replaced manual customer User ID entry with an employee dropdown. Admin customer records now show the assigned employee username and User ID.
+- Employee inbox refreshes automatically every 10 seconds while open and refreshes again when the browser window regains focus.
+- Enter sends a chat message; Shift+Enter inserts a new line. Message timestamps are rendered in Asia/Yangon (Myanmar Time).
+- Replaced generic private tags input with fixed English customer profile fields: Nickname, Age, Retired, Currently Working, Marital Status, Living Alone, and Location. These fields are saved as shared tags and shown to authorized assigned employees and administrators. Record only information voluntarily provided by the customer.
+- Expanded Telegram account cards for admins and superadmins with account ID, label, masked phone, status, customer count, and connection time. Encrypted Telegram sessions are never exposed.
+- Fixed timezone-aware/naive datetime handling in the admin statistics endpoint.
+- Employee login links use `APP_BASE_URL` (or `PUBLIC_APP_URL`) when configured. Set this to a custom domain you own and have connected to the hosting service to avoid exposing the hosting-provider hostname. Without it, the UI shows a relative `/login/<username>` path.

@@ -19,7 +19,7 @@ app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins.split(','
 app.mount('/static', StaticFiles(directory='static'), name='static')
 
 class LoginIn(BaseModel): username: str; password: str
-class UserIn(BaseModel): username: str; password: str = Field(min_length=10); role: str = 'employee'; team_id: int | None = None
+class UserIn(BaseModel): username: str; password: str = Field(min_length=10); role: str = 'chatting'; team_id: int | None = None
 class TeamIn(BaseModel): name: str
 class PhoneIn(BaseModel): phone: str
 class CodeIn(BaseModel): phone_code_hash: str; code: str; password: str | None = None
@@ -91,10 +91,10 @@ def list_users(db: Session = Depends(get_db), actor: User = Depends(admin)):
 
 @app.post('/api/admin/users')
 def create_user(data: UserIn, request: Request, db: Session = Depends(get_db), actor: User = Depends(admin)):
-    if data.role not in ('admin','employee'): raise HTTPException(400,'Role must be admin or employee')
+    if data.role not in ('admin','employee','chatting','finding'): raise HTTPException(400,'Role must be admin, Chatting, or Finding')
     if db.query(User).filter_by(username=data.username).first(): raise HTTPException(409,'Username already exists')
     if data.team_id and not db.get(Team,data.team_id): raise HTTPException(404,'Team not found')
-    u=User(username=data.username,password_hash=hash_password(data.password),role=data.role,team_id=data.team_id); db.add(u); db.commit(); db.refresh(u); audit(db,actor,'user.create','user',u.id); login_url=str(request.base_url).rstrip('/') + '/login/' + u.username; return {'id':u.id,'username':u.username,'role':u.role,'login_url':login_url}
+    u=User(username=data.username,password_hash=hash_password(data.password),role=data.role,team_id=data.team_id); db.add(u); db.commit(); db.refresh(u); audit(db,actor,'user.create','user',u.id); base=settings.app_base_url.rstrip('/') if settings.app_base_url else ''; login_url=(base + '/login/' + u.username) if base else ('/login/' + u.username); return {'id':u.id,'username':u.username,'role':u.role,'login_url':login_url,'needs_custom_domain':not bool(base)}
 
 @app.patch('/api/admin/users/{uid}')
 def update_user(uid:int, active:bool, db:Session=Depends(get_db), actor:User=Depends(admin)):
@@ -153,13 +153,17 @@ async def telegram_complete(data:CodeIn, db:Session=Depends(get_db), actor:User=
         return result
     except Exception as e: raise HTTPException(400,str(e))
 
+@app.get('/api/admin/app-url')
+def admin_app_url(actor: User = Depends(admin)):
+    return {'base_url': settings.app_base_url.rstrip('/') if settings.app_base_url else ''}
+
 @app.get('/api/admin/telegram/accounts')
 def telegram_accounts(db:Session=Depends(get_db), actor:User=Depends(admin)):
-    return [{'id':a.id,'label':a.label,'phone_masked':a.phone_masked,'status':a.status,'created_at':a.created_at.isoformat()} for a in db.query(TgAccount).all()]
+    return [{'id':a.id,'label':a.label,'phone_masked':a.phone_masked,'status':a.status,'created_at':a.created_at.isoformat(),'customer_count':db.query(Customer).filter_by(account_id=a.id).count()} for a in db.query(TgAccount).order_by(TgAccount.id).all()]
 
 @app.get('/api/admin/customers')
 def admin_customers(db:Session=Depends(get_db), actor:User=Depends(admin)):
-    return [{'id':c.id,'alias':c.alias,'telegram_username':c.real_username,'telegram_user_id':c.telegram_peer_id,'name':c.real_name,'phone':c.phone,'account_id':c.account_id,'assigned_to':[a.user_id for a in db.query(Assignment).filter_by(customer_id=c.id,active=True).all()]} for c in db.query(Customer).all()]
+    return [{'id':c.id,'alias':c.alias,'telegram_username':c.real_username,'telegram_user_id':c.telegram_peer_id,'name':c.real_name,'phone':c.phone,'account_id':c.account_id,'assigned_to':[{'user_id':a.user_id,'username':db.get(User,a.user_id).username if db.get(User,a.user_id) else 'Unknown'} for a in db.query(Assignment).filter_by(customer_id=c.id,active=True).all()]} for c in db.query(Customer).all()]
 
 @app.post('/api/admin/assign')
 def assign(data:AssignIn, db:Session=Depends(get_db), actor:User=Depends(admin)):
@@ -168,7 +172,7 @@ def assign(data:AssignIn, db:Session=Depends(get_db), actor:User=Depends(admin))
     # Reassignment revokes old active assignments but never deletes history/messages/tags.
     old=db.query(Assignment).filter_by(customer_id=c.id,active=True).all()
     for a in old: a.active=False; a.revoked_at=datetime.now(timezone.utc)
-    db.add(Assignment(customer_id=c.id,user_id=u.id,assigned_by=actor.id,active=True)); db.commit(); audit(db,actor,'customer.assign','customer',c.id,f'to_user={u.id}'); return {'ok':True,'history_preserved':True}
+    assignment=Assignment(customer_id=c.id,user_id=u.id,assigned_by=actor.id,active=True); db.add(assignment); db.commit(); audit(db,actor,'customer.assign','customer',c.id,f'to_user={u.id}'); return {'ok':True,'history_preserved':True,'customer_id':c.id,'user_id':u.id,'username':u.username,'assignment_id':assignment.id}
 
 @app.post('/api/admin/assign/bulk')
 def bulk_assign(data:BulkAssignIn, db:Session=Depends(get_db), actor:User=Depends(admin)):
@@ -239,16 +243,17 @@ def get_tags(cid:int, db:Session=Depends(get_db), user:User=Depends(current_user
     if not c or not can_access(db,user,cid): raise HTTPException(404,'Customer not found')
     q=db.query(Tag).filter(Tag.customer_id==cid)
     if user.role not in ('admin','superadmin'):
-        q=q.filter((Tag.scope=='private') & (Tag.owner_user_id==user.id) | (Tag.scope=='team') & (Tag.team_id==user.team_id))
+        q=q.filter(((Tag.scope=='private') & (Tag.owner_user_id==user.id)) | ((Tag.scope=='team') & (Tag.team_id==user.team_id)) | (Tag.scope=='shared'))
     return [{'id':t.id,'key':t.key,'value':t.value,'scope':t.scope,'updated_at':t.updated_at.isoformat()} for t in q.all()]
 
 @app.post('/api/customers/{cid}/tags')
 def upsert_tag(cid:int,data:TagIn, db:Session=Depends(get_db), user:User=Depends(current_user)):
     c=db.get(Customer,cid)
     if not c or not can_access(db,user,cid): raise HTTPException(404,'Customer not found')
-    if data.scope not in ('private','team'): raise HTTPException(400,'scope must be private or team')
-    if data.scope=='team' and not user.team_id and user.role=='employee': raise HTTPException(400,'Join a team before creating team tags')
-    if user.role in ('admin','superadmin') and data.scope=='private': owner=None
+    if data.scope not in ('private','team','shared'): raise HTTPException(400,'scope must be private, team, or shared')
+    if data.scope=='team' and not user.team_id and user.role not in ('admin','superadmin'): raise HTTPException(400,'Join a team before creating team tags')
+    if data.scope=='shared' and user.role not in ('admin','superadmin'): owner=None
+    elif user.role in ('admin','superadmin') and data.scope=='private': owner=None
     else: owner=user.id if data.scope=='private' else None
     team_id=user.team_id if data.scope=='team' else None
     tag=db.query(Tag).filter_by(customer_id=cid,scope=data.scope,owner_user_id=owner,team_id=team_id,key=data.key).first()
@@ -268,7 +273,14 @@ def delete_tag(tag_id:int, db:Session=Depends(get_db), user:User=Depends(current
 def stats(db:Session=Depends(get_db), actor:User=Depends(admin)):
     today=datetime.now(timezone.utc).date()
     users=db.query(User).all(); active_assignments=db.query(Assignment).filter_by(active=True).count()
-    return {'employees':len([u for u in users if u.role=='employee']),'online_last_5m':len([u for u in users if u.last_seen and (datetime.now(timezone.utc)-u.last_seen).total_seconds()<300]),'active_conversations':active_assignments,'today_received':db.query(Assignment).filter(Assignment.assigned_at>=datetime.combine(today,datetime.min.time(),tzinfo=timezone.utc)).count(),'telegram_accounts':db.query(TgAccount).count()}
+    online=0
+    now_utc=datetime.now(timezone.utc)
+    for u in users:
+        if not u.last_seen: continue
+        last_seen=u.last_seen if u.last_seen.tzinfo else u.last_seen.replace(tzinfo=timezone.utc)
+        if (now_utc-last_seen).total_seconds()<300: online+=1
+    employee_roles=('employee','chatting','finding')
+    return {'employees':len([u for u in users if u.role in employee_roles]),'online_last_5m':online,'active_conversations':active_assignments,'today_received':db.query(Assignment).filter(Assignment.assigned_at>=datetime.combine(today,datetime.min.time(),tzinfo=timezone.utc)).count(),'telegram_accounts':db.query(TgAccount).count()}
 
 @app.get('/api/admin/audit')
 def audit_logs(limit:int=100,db:Session=Depends(get_db),actor:User=Depends(admin)):
