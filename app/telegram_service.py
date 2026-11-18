@@ -6,7 +6,7 @@ from telethon.errors import SessionPasswordNeededError
 from sqlalchemy.exc import IntegrityError
 from .config import settings
 from .db import SessionLocal
-from .models import TgAccount, Customer, Message, Assignment, Notification
+from .models import TgAccount, Customer, Message
 from .security import encrypt_session, decrypt_session
 
 _clients: dict[int, TelegramClient] = {}
@@ -144,9 +144,6 @@ def attach_handlers(account_id: int, client: TelegramClient):
                     media_path = await save_message_media(account_id, event.message, customer.id)
                     db.add(Message(customer_id=customer.id, telegram_message_id=mid, direction='in', body=event.raw_text or '', media_path=os.path.relpath(media_path, upload_root()) if media_path else '', sent_at=event.date or datetime.now(timezone.utc), sender_label='Customer'))
                     await save_avatar(account_id, customer, sender)
-                    db.flush()
-                    for assignment in db.query(Assignment).filter_by(customer_id=customer.id, active=True).all():
-                        db.add(Notification(user_id=assignment.user_id, customer_id=customer.id, title='New customer message', body=f'{customer.alias or "A customer"} sent a new Telegram message.', kind='message'))
                     db.commit()
             finally: db.close()
         except Exception as e: print('telegram incoming handler:', repr(e))
