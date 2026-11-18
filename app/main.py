@@ -29,6 +29,9 @@ with engine.begin() as conn:
         conn.exec_driver_sql("ALTER TABLE users ADD COLUMN totp_secret VARCHAR(64)")
     if "totp_enabled" not in columns:
         conn.exec_driver_sql("ALTER TABLE users ADD COLUMN totp_enabled BOOLEAN NOT NULL DEFAULT FALSE")
+    # TOTP Fernet ciphertext is about 140 characters; VARCHAR(64) is too short.
+    if engine.dialect.name == 'postgresql':
+        conn.exec_driver_sql("ALTER TABLE users ALTER COLUMN totp_secret TYPE VARCHAR(255)")
     conn.exec_driver_sql("CREATE UNIQUE INDEX IF NOT EXISTS ix_users_public_id ON users (public_id)")
     if "created_by_user_id" not in columns:
         conn.exec_driver_sql("ALTER TABLE users ADD COLUMN created_by_user_id INTEGER")
@@ -36,9 +39,8 @@ with engine.begin() as conn:
     if "avatar_path" not in customer_columns:
         conn.exec_driver_sql("ALTER TABLE customers ADD COLUMN avatar_path VARCHAR(500) NOT NULL DEFAULT ''")
 
-    # v7.6 production hotfix: create_all() creates missing tables but does not
-    # add newly introduced columns to an existing PostgreSQL table. Older
-    # presence_sessions tables therefore need an explicit additive migration.
+    # Additive migration for older PostgreSQL deployments. create_all() does not
+    # add columns to an existing table, so this must run before presence queries.
     presence_columns = (
         {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(presence_sessions)").fetchall()}
         if engine.dialect.name == "sqlite"
@@ -65,7 +67,7 @@ with SessionLocal() as _migration_db:
         _user.public_id = make_public_user_id(_migration_db)
     _migration_db.commit()
 
-app = FastAPI(title='X-Wallet Chat Management', version='7.6.0')
+app = FastAPI(title='X-Wallet Chat Management', version='7.6.2')
 app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins.split(','), allow_credentials=False, allow_methods=['*'], allow_headers=['*'])
 app.mount('/static', StaticFiles(directory='static'), name='static')
 
@@ -136,7 +138,9 @@ async def startup():
             db.add(User(username=settings.admin_username, public_id=make_public_user_id(db), password_hash=hash_password(settings.admin_password), role='superadmin', active=True)); db.commit()
     finally: db.close()
     if settings.telegram_api_id and settings.telegram_api_hash and settings.session_encryption_key:
-        asyncio.create_task(tg.restore_clients())
+        # Await restoration so Sync buttons cannot race startup and report a false
+        # 'not connected' state while the account is still being rehydrated.
+        await tg.restore_clients()
 
 @app.get('/')
 def home(): return FileResponse('static/index.html')
@@ -307,8 +311,13 @@ def setup_2fa(db: Session = Depends(get_db), user: User = Depends(admin)):
     if user.totp_enabled:
         raise HTTPException(409, '2FA is already enabled on this account.')
     secret = pyotp.random_base32()
-    user.totp_secret = encrypt_session(secret)
-    db.commit()
+    try:
+        user.totp_secret = encrypt_session(secret)
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        print('2FA setup storage error:', repr(exc))
+        raise HTTPException(503, '2FA secret could not be stored. Check PostgreSQL users.totp_secret column is VARCHAR(255) and SESSION_ENCRYPTION_KEY is a valid unchanged Fernet key.')
     account_label = f"X-Wallet · {user.username}"
     uri = pyotp.TOTP(secret).provisioning_uri(name=user.username, issuer_name='X-Wallet')
     qr = qrcode.QRCode(box_size=4, border=2)
@@ -347,9 +356,14 @@ def admin_setup_user_2fa(uid: int, db: Session = Depends(get_db), actor: User = 
     if target.role in ('admin', 'superadmin') and actor.role != 'superadmin':
         raise HTTPException(403, 'Only the super administrator can manage administrator 2FA')
     secret = pyotp.random_base32()
-    target.totp_secret = encrypt_session(secret)
-    target.totp_enabled = False
-    db.commit()
+    try:
+        target.totp_secret = encrypt_session(secret)
+        target.totp_enabled = False
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        print('Employee 2FA setup storage error:', repr(exc))
+        raise HTTPException(503, '2FA secret could not be stored. Check PostgreSQL users.totp_secret column is VARCHAR(255) and SESSION_ENCRYPTION_KEY is a valid unchanged Fernet key.')
     issuer = 'X-Wallet'
     account_name = f'{issuer} ({target.username})'
     uri = pyotp.TOTP(secret).provisioning_uri(name=target.username, issuer_name=issuer)

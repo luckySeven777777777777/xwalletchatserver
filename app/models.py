@@ -9,7 +9,7 @@ class User(Base):
     __tablename__ = 'users'
     id: Mapped[int] = mapped_column(primary_key=True)
     public_id: Mapped[str | None] = mapped_column(String(6), unique=True, nullable=True, index=True)
-    totp_secret: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    totp_secret: Mapped[str | None] = mapped_column(String(255), nullable=True)
     totp_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     username: Mapped[str] = mapped_column(String(80), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(255))
