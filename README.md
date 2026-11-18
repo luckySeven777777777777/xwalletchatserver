@@ -210,3 +210,7 @@ In the X-Wallet service Variables, set `DATABASE_URL` to the Railway PostgreSQL 
 - Telegram connected-account cards are placed above the customer list; team management is combined with the Create Team card; the 2FA information card is placed below Social Channels.
 - The migration adds `customers.dialog_folder` and `customers.is_saved_messages` without dropping existing records.
 - Live Telegram sync still requires deployment with valid Telegram credentials and an authorized account. Telegram privacy settings may prevent access to some profile fields or media.
+
+
+## v7.6.4 operational note
+Railway reported `OSError(28): No space left on device` during Telegram account avatar writes. This release serves connected-account profile photos from process memory to avoid that particular write. It is not a substitute for freeing/increasing the Railway volume: message media and other uploads still need disk space. The in-memory avatar cache is lost when the process restarts and is repopulated when an admin refreshes the connected account profile.

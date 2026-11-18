@@ -17,6 +17,7 @@ class User(Base):
     team_id: Mapped[int | None] = mapped_column(ForeignKey('teams.id'), nullable=True)
     created_by_user_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
+    permissions: Mapped[str] = mapped_column(Text, default='[]')
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     last_seen: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 

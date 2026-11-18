@@ -1,7 +1,7 @@
-import asyncio, re, secrets, os, uuid, mimetypes, base64, hmac
+import asyncio, re, secrets, os, uuid, mimetypes, base64, hmac, json
 from datetime import datetime, timezone, timedelta
 from fastapi import FastAPI, Depends, HTTPException, Header, UploadFile, File, Form, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -19,6 +19,37 @@ from zoneinfo import ZoneInfo
 
 Base.metadata.create_all(bind=engine)
 
+# Fine-grained delegated-admin permissions. Superadmins always bypass this matrix.
+ADMIN_PERMISSION_KEYS = {
+    'users.create_employee', 'users.manage_status',
+    'users.delete', 'users.reset_password', 'users.manage_team', 'users.manage_2fa',
+    'teams.manage', 'telegram.connect', 'telegram.sync', 'customers.assign',
+    'stats.view',
+}
+LEGACY_ADMIN_PERMISSIONS = sorted(ADMIN_PERMISSION_KEYS)
+
+def user_permissions(user):
+    if user.role == 'superadmin':
+        return sorted(ADMIN_PERMISSION_KEYS)
+    try:
+        value = json.loads(user.permissions or '[]')
+        return sorted({p for p in value if p in ADMIN_PERMISSION_KEYS}) if isinstance(value, list) else []
+    except Exception:
+        return []
+
+def require_permission(actor, permission):
+    if actor.role == 'superadmin':
+        return
+    if actor.role != 'admin' or permission not in user_permissions(actor):
+        raise HTTPException(403, f'Missing administrator permission: {permission}')
+
+def require_any_permission(actor, *permissions):
+    if actor.role == 'superadmin':
+        return
+    allowed=set(user_permissions(actor))
+    if actor.role != 'admin' or not (allowed & set(permissions)):
+        raise HTTPException(403, 'Missing administrator permission: ' + ' or '.join(permissions))
+
 # Backward-compatible migration: add stable public six-digit account IDs without
 # changing the internal primary keys used by assignments and foreign keys.
 with engine.begin() as conn:
@@ -35,6 +66,10 @@ with engine.begin() as conn:
     conn.exec_driver_sql("CREATE UNIQUE INDEX IF NOT EXISTS ix_users_public_id ON users (public_id)")
     if "created_by_user_id" not in columns:
         conn.exec_driver_sql("ALTER TABLE users ADD COLUMN created_by_user_id INTEGER")
+    if "permissions" not in columns:
+        conn.exec_driver_sql("ALTER TABLE users ADD COLUMN permissions TEXT NOT NULL DEFAULT '[]'")
+        # Preserve the existing behavior of already-created delegated admins.
+        conn.exec_driver_sql("UPDATE users SET permissions = '" + json.dumps(LEGACY_ADMIN_PERMISSIONS) + "' WHERE role = 'admin'")
     customer_columns = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(customers)").fetchall()} if engine.dialect.name == "sqlite" else {row[0] for row in conn.exec_driver_sql("SELECT column_name FROM information_schema.columns WHERE table_name='customers'").fetchall()}
     if "avatar_path" not in customer_columns:
         conn.exec_driver_sql("ALTER TABLE customers ADD COLUMN avatar_path VARCHAR(500) NOT NULL DEFAULT ''")
@@ -71,7 +106,9 @@ with SessionLocal() as _migration_db:
         _user.public_id = make_public_user_id(_migration_db)
     _migration_db.commit()
 
-app = FastAPI(title='X-Wallet Chat Management', version='7.6.3')
+app = FastAPI(title='X-Wallet Chat Management', version='7.6.4')
+# Memory cache prevents connected-account avatar refresh from failing on a full Railway volume.
+_TELEGRAM_ACCOUNT_AVATAR_CACHE: dict[int, bytes] = {}
 app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins.split(','), allow_credentials=False, allow_methods=['*'], allow_headers=['*'])
 app.mount('/static', StaticFiles(directory='static'), name='static')
 
@@ -79,7 +116,8 @@ class LoginIn(BaseModel): username: str; password: str
 class TwoFactorVerifyIn(BaseModel): challenge_token: str; code: str
 class TwoFactorCodeIn(BaseModel): code: str
 class ForwardIn(BaseModel): target_customer_id: int
-class UserIn(BaseModel): username: str; password: str = Field(min_length=10); role: str = 'chatting'; team_id: int | None = None
+class UserIn(BaseModel): username: str; password: str = Field(min_length=10); role: str = 'chatting'; team_id: int | None = None; permissions: list[str] = Field(default_factory=list)
+class UserPermissionsIn(BaseModel): permissions: list[str] = Field(default_factory=list)
 class TeamIn(BaseModel): name: str
 class PhoneIn(BaseModel): phone: str
 class CodeIn(BaseModel): phone_code_hash: str; code: str; password: str | None = None
@@ -278,7 +316,7 @@ def redact(text: str):
 
 @app.get('/api/me')
 def me(user: User = Depends(current_user)):
-    return {'id':user.id,'public_id':user.public_id,'username':user.username,'role':user.role,'team_id':user.team_id,'totp_enabled':user.totp_enabled}
+    return {'id':user.id,'public_id':user.public_id,'username':user.username,'role':user.role,'team_id':user.team_id,'totp_enabled':user.totp_enabled,'permissions':user_permissions(user)}
 
 @app.post('/api/presence/heartbeat')
 def presence_heartbeat(request: Request, db: Session = Depends(get_db), user: User = Depends(current_user)):
@@ -359,6 +397,7 @@ def disable_2fa(data: TwoFactorCodeIn, db: Session = Depends(get_db), user: User
 
 @app.post('/api/admin/users/{uid}/2fa/setup')
 def admin_setup_user_2fa(uid: int, db: Session = Depends(get_db), actor: User = Depends(admin)):
+    require_permission(actor, 'users.manage_2fa')
     target = db.get(User, uid)
     if not target or not target.active:
         raise HTTPException(404, 'Active user not found')
@@ -386,6 +425,7 @@ def admin_setup_user_2fa(uid: int, db: Session = Depends(get_db), actor: User = 
 
 @app.post('/api/admin/users/{uid}/2fa/confirm')
 def admin_confirm_user_2fa(uid: int, data: TwoFactorCodeIn, db: Session = Depends(get_db), actor: User = Depends(admin)):
+    require_permission(actor, 'users.manage_2fa')
     target = db.get(User, uid)
     if not target or not target.active or not target.totp_secret:
         raise HTTPException(404, '2FA setup was not found for this active account')
@@ -413,13 +453,23 @@ def admin_reset_user_2fa(uid: int, db: Session = Depends(get_db), actor: User = 
 
 @app.get('/api/admin/users')
 def list_users(db: Session = Depends(get_db), actor: User = Depends(admin)):
-    return [{'id':u.id,'public_id':u.public_id,'username':u.username,'role':u.role,'team_id':u.team_id,'active':u.active,'totp_enabled':u.totp_enabled,'created_at':u.created_at.isoformat(),'last_seen':u.last_seen.isoformat() if u.last_seen else None,'created_by_user_id':u.created_by_user_id} for u in db.query(User).order_by(User.id).all()]
+    require_any_permission(actor, 'users.create_employee','users.manage_status','users.delete','users.reset_password','users.manage_team','users.manage_2fa','customers.assign')
+    return [{'id':u.id,'public_id':u.public_id,'username':(u.username[len(f'deleted_{u.id}_'):] if u.username.startswith(f'deleted_{u.id}_') else u.username),'deleted':u.username.startswith(f'deleted_{u.id}_'),'role':u.role,'team_id':u.team_id,'active':u.active,'totp_enabled':u.totp_enabled,'created_at':u.created_at.isoformat(),'last_seen':u.last_seen.isoformat() if u.last_seen else None,'created_by_user_id':u.created_by_user_id,'permissions':user_permissions(u)} for u in db.query(User).order_by(User.id).all()]
 
 @app.post('/api/admin/users')
 def create_user(data: UserIn, request: Request, db: Session = Depends(get_db), actor: User = Depends(admin)):
     username = data.username.strip()
+    if data.role == 'admin':
+        if actor.role != 'superadmin':
+            raise HTTPException(403, 'Only the super administrator can create administrator accounts')
+        require_permission(actor, 'users.create_admin')
+    else:
+        require_permission(actor, 'users.create_employee')
     if not username or len(username) > 80:
         raise HTTPException(400, 'Username must contain 1 to 80 characters')
+    invalid_permissions=sorted(set(data.permissions)-ADMIN_PERMISSION_KEYS)
+    if invalid_permissions:
+        raise HTTPException(400, 'Unknown permissions: '+', '.join(invalid_permissions))
     if data.role not in ('admin', 'employee', 'chatting', 'finding'):
         raise HTTPException(400, 'Role must be admin, Chatting, or Finding')
     if len(data.password) < 10:
@@ -433,7 +483,8 @@ def create_user(data: UserIn, request: Request, db: Session = Depends(get_db), a
     try:
         u = User(username=username, public_id=make_public_user_id(db),
                  password_hash=hash_password(data.password), role=data.role,
-                 team_id=data.team_id, created_by_user_id=actor.id, active=True)
+                 team_id=data.team_id, created_by_user_id=actor.id, active=True,
+                 permissions=json.dumps(sorted({p for p in data.permissions if p in ADMIN_PERMISSION_KEYS}) if data.role == 'admin' else []))
         db.add(u)
         db.flush()
         db.commit()
@@ -451,44 +502,85 @@ def create_user(data: UserIn, request: Request, db: Session = Depends(get_db), a
     login_path = ('/finding/' if u.role == 'finding' else '/login/') + quote(u.username, safe='')
     login_url = base_url + login_path
     return {'id': u.id, 'public_id': u.public_id, 'username': u.username,
-            'role': u.role, 'login_url': login_url, 'needs_custom_domain': False}
+            'role': u.role, 'permissions': user_permissions(u), 'login_url': login_url, 'needs_custom_domain': False}
 
 @app.patch('/api/admin/users/{uid}')
 def update_user(uid:int, active:bool, db:Session=Depends(get_db), actor:User=Depends(admin)):
+    require_permission(actor, 'users.manage_status')
     u=db.get(User,uid)
     if not u: raise HTTPException(404,'User not found')
-    u.active=active; db.commit(); audit(db,actor,'user.active','user',uid,str(active)); return {'ok':True}
+    if u.role == 'superadmin' or (actor.role != 'superadmin' and u.role == 'admin'):
+        raise HTTPException(403, 'You cannot change the status of this administrator account')
+    if u.id == actor.id and not active:
+        raise HTTPException(400, 'You cannot disable your own account')
+    if active and u.username.startswith(f'deleted_{u.id}_'):
+        restored=u.username[len(f'deleted_{u.id}_'):]
+        if db.query(User).filter(func.lower(User.username)==restored.lower(), User.id!=u.id).first():
+            raise HTTPException(409, 'Cannot restore original username because it is already in use')
+        u.username=restored
+    u.active=active
+    if not active:
+        for session in db.query(PresenceSession).filter_by(user_id=u.id, is_active=True).all():
+            session.is_active=False; session.logout_at=datetime.now(timezone.utc)
+    db.commit(); audit(db,actor,'user.active','user',uid,str(active)); return {'ok':True,'active':u.active}
+
+@app.put('/api/admin/users/{uid}/permissions')
+def update_user_permissions(uid:int, data:UserPermissionsIn, db:Session=Depends(get_db), actor:User=Depends(superadmin)):
+    target=db.get(User,uid)
+    if not target: raise HTTPException(404,'User not found')
+    if target.role != 'admin': raise HTTPException(400,'Permissions can only be assigned to administrator accounts')
+    invalid=sorted(set(data.permissions)-ADMIN_PERMISSION_KEYS)
+    if invalid: raise HTTPException(400,'Unknown permissions: '+', '.join(invalid))
+    target.permissions=json.dumps(sorted(set(data.permissions)))
+    db.commit(); audit(db,actor,'user.permissions_update','user',uid,','.join(sorted(set(data.permissions))))
+    return {'ok':True,'permissions':user_permissions(target)}
 
 @app.post('/api/admin/users/{uid}/password')
 def reset_user_password(uid:int, data:dict, db:Session=Depends(get_db), actor:User=Depends(admin)):
+    require_permission(actor, 'users.reset_password')
     u=db.get(User,uid)
     password=data.get('password','')
     if not u: raise HTTPException(404,'User not found')
+    if actor.role != 'superadmin' and u.role in ('admin','superadmin'):
+        raise HTTPException(403, 'You cannot reset this administrator password')
     if len(password)<10: raise HTTPException(400,'Password must be at least 10 characters')
     u.password_hash=hash_password(password); db.commit(); audit(db,actor,'user.password_reset','user',uid)
     return {'ok':True}
 
 @app.delete('/api/admin/users/{uid}')
 def delete_user(uid:int, db:Session=Depends(get_db), actor:User=Depends(admin)):
+    require_permission(actor, 'users.delete')
     u=db.get(User,uid)
     if not u: raise HTTPException(404,'User not found')
     if u.id==actor.id: raise HTTPException(400,'Cannot delete yourself')
-    u.active=False; u.username=f'deleted_{u.id}_{u.username}'; db.commit(); audit(db,actor,'user.soft_delete','user',uid); return {'ok':True,'note':'Soft deleted; historical records retained'}
+    if u.role == 'superadmin' or (actor.role != 'superadmin' and u.role == 'admin'):
+        raise HTTPException(403, 'You cannot delete this administrator account')
+    if not u.username.startswith(f'deleted_{u.id}_'):
+        u.username=f'deleted_{u.id}_{u.username}'
+    u.active=False
+    for session in db.query(PresenceSession).filter_by(user_id=u.id, is_active=True).all():
+        session.is_active=False; session.logout_at=datetime.now(timezone.utc)
+    db.commit(); audit(db,actor,'user.soft_delete','user',uid); return {'ok':True,'note':'Soft deleted; historical records retained'}
 
 @app.post('/api/admin/teams')
 def create_team(data:TeamIn, db:Session=Depends(get_db), actor:User=Depends(admin)):
+    require_permission(actor, 'teams.manage')
     if db.query(Team).filter_by(name=data.name).first(): raise HTTPException(409,'Team exists')
     t=Team(name=data.name); db.add(t); db.commit(); db.refresh(t); audit(db,actor,'team.create','team',t.id); return {'id':t.id,'name':t.name}
 
 @app.get('/api/admin/teams')
 def list_teams(db:Session=Depends(get_db), actor:User=Depends(admin)):
+    require_any_permission(actor, 'teams.manage','users.manage_team')
     return [{'id':t.id,'name':t.name} for t in db.query(Team).all()]
 
 @app.patch('/api/admin/users/{uid}/team')
 def set_user_team(uid: int, data: dict, db: Session = Depends(get_db), actor: User = Depends(admin)):
+    require_permission(actor, 'users.manage_team')
     user = db.get(User, uid)
     if not user:
         raise HTTPException(404, 'User not found')
+    if actor.role != 'superadmin' and user.role in ('admin','superadmin'):
+        raise HTTPException(403, 'You cannot change this administrator team')
     team_id = data.get('team_id')
     if team_id is not None and not db.get(Team, int(team_id)):
         raise HTTPException(404, 'Team not found')
@@ -499,11 +591,13 @@ def set_user_team(uid: int, data: dict, db: Session = Depends(get_db), actor: Us
 
 @app.post('/api/admin/telegram/begin')
 async def telegram_begin(data:PhoneIn, actor:User=Depends(admin)):
+    require_permission(actor, 'telegram.connect')
     try: return {'phone_code_hash':await tg.begin_login(data.phone)}
     except Exception as e: raise HTTPException(400,str(e))
 
 @app.post('/api/admin/telegram/complete')
 async def telegram_complete(data:CodeIn, db:Session=Depends(get_db), actor:User=Depends(admin)):
+    require_permission(actor, 'telegram.connect')
     try:
         result=await tg.finish_login(data.phone_code_hash,data.code,data.password)
         if result.get('account_id'): audit(db,actor,'telegram.account.connect','telegram_account',result['account_id'])
@@ -512,14 +606,17 @@ async def telegram_complete(data:CodeIn, db:Session=Depends(get_db), actor:User=
 
 @app.get('/api/admin/app-url')
 def admin_app_url(actor: User = Depends(admin)):
+    require_permission(actor, 'users.create_employee')
     return {'base_url': 'https://xwalletchatserver-production.up.railway.app'}
 
 @app.get('/api/admin/telegram/accounts')
 def telegram_accounts(db:Session=Depends(get_db), actor:User=Depends(admin)):
+    if actor.role != 'superadmin' and not ({'telegram.connect','telegram.sync','customers.assign'} & set(user_permissions(actor))): raise HTTPException(403, 'Missing Telegram account permission')
     return [{'id':a.id,'label':a.label,'phone_masked':a.phone_masked,'status':a.status,'created_at':utc_iso(a.created_at),'customer_count':db.query(Customer).filter_by(account_id=a.id).count()} for a in db.query(TgAccount).order_by(TgAccount.id).all()]
 
 @app.post('/api/admin/telegram/accounts/{account_id}/sync')
 async def admin_sync_telegram_account(account_id: int, db: Session = Depends(get_db), actor: User = Depends(admin)):
+    require_permission(actor, 'telegram.sync')
     account = db.get(TgAccount, account_id)
     if not account:
         raise HTTPException(404, 'Telegram account not found')
@@ -542,6 +639,7 @@ async def admin_sync_telegram_account(account_id: int, db: Session = Depends(get
 
 @app.get('/api/admin/telegram/accounts/{account_id}/profile')
 async def admin_telegram_account_profile(account_id: int, db: Session = Depends(get_db), actor: User = Depends(admin)):
+    if actor.role != 'superadmin' and not ({'telegram.connect','telegram.sync'} & set(user_permissions(actor))): raise HTTPException(403, 'Missing Telegram account permission')
     account = db.get(TgAccount, account_id)
     if not account:
         raise HTTPException(404, 'Telegram account not found.')
@@ -550,36 +648,46 @@ async def admin_telegram_account_profile(account_id: int, db: Session = Depends(
         raise HTTPException(409, 'Telegram account is not connected.')
     me = await client.get_me()
     name = ' '.join(filter(None, [getattr(me, 'first_name', ''), getattr(me, 'last_name', '')])).strip()
-    if name:
+    if name and account.label != name[:120]:
         account.label = name[:120]
         db.commit()
-    os.makedirs(UPLOAD_ROOT, exist_ok=True)
-    avatar_file = os.path.join(UPLOAD_ROOT, f'tg_account_{account_id}_avatar.jpg')
-    avatar_available = os.path.isfile(avatar_file)
+
+    # Avoid filesystem writes: Railway logs showed OSError(28), no space left on device.
+    avatar_available = account_id in _TELEGRAM_ACCOUNT_AVATAR_CACHE
     try:
-        saved = await client.download_profile_photo(me, file=avatar_file)
-        avatar_available = bool(saved) or os.path.isfile(avatar_file)
+        photo_bytes = await client.download_profile_photo(me, file=bytes)
+        if photo_bytes:
+            _TELEGRAM_ACCOUNT_AVATAR_CACHE[account_id] = photo_bytes
+            avatar_available = True
     except Exception as exc:
-        # Keep the last known avatar if Telegram temporarily cannot return a photo.
-        print('telegram account avatar sync:', repr(exc))
+        print('telegram account avatar sync (memory cache):', repr(exc))
+        avatar_available = avatar_available or os.path.isfile(os.path.join(UPLOAD_ROOT, f'tg_account_{account_id}_avatar.jpg'))
+
     return {
         'id': getattr(me, 'id', None),
         'name': name or account.label or str(account_id),
         'username': getattr(me, 'username', '') or '',
         'phone': getattr(me, 'phone', '') or '',
         'avatar_available': avatar_available,
-        'avatar_url': f'/api/admin/telegram/accounts/{account_id}/avatar?v={int(os.path.getmtime(avatar_file))}' if avatar_available else None
+        'avatar_url': f'/api/admin/telegram/accounts/{account_id}/avatar?v={int(datetime.now().timestamp())}' if avatar_available else None
     }
 
 @app.get('/api/admin/telegram/accounts/{account_id}/avatar')
 def admin_telegram_account_avatar(account_id: int, actor: User = Depends(admin)):
+    if actor.role != 'superadmin' and not ({'telegram.connect','telegram.sync'} & set(user_permissions(actor))): raise HTTPException(403, 'Missing Telegram account permission')
+    photo = _TELEGRAM_ACCOUNT_AVATAR_CACHE.get(account_id)
+    if photo:
+        return Response(content=photo, media_type='image/jpeg',
+                        headers={'Cache-Control': 'no-store, max-age=0'})
     path = os.path.join(UPLOAD_ROOT, f'tg_account_{account_id}_avatar.jpg')
-    if not os.path.isfile(path):
-        raise HTTPException(404, 'Telegram account avatar is not available yet. Refresh account profile first.')
-    return FileResponse(path, media_type='image/jpeg')
+    if os.path.isfile(path):
+        return FileResponse(path, media_type='image/jpeg',
+                            headers={'Cache-Control': 'no-store, max-age=0'})
+    raise HTTPException(404, 'Telegram avatar is not cached. Refresh the connected account profile.')
 
 @app.get('/api/admin/customers')
 def admin_customers(account_id:int|None=None, db:Session=Depends(get_db), actor:User=Depends(admin)):
+    require_any_permission(actor, 'customers.assign','telegram.sync')
     q=db.query(Customer)
     if account_id is not None:
         q=q.filter(Customer.account_id==account_id)
@@ -599,6 +707,7 @@ def admin_customers(account_id:int|None=None, db:Session=Depends(get_db), actor:
 
 @app.get('/api/admin/customers/{cid}/avatar')
 def admin_customer_avatar(cid:int, db:Session=Depends(get_db), actor:User=Depends(admin)):
+    require_any_permission(actor, 'customers.assign','telegram.sync')
     c=db.get(Customer,cid)
     if not c or not c.avatar_path: raise HTTPException(404,'Telegram profile photo is not available')
     path=safe_upload_path(c.avatar_path)
@@ -606,6 +715,7 @@ def admin_customer_avatar(cid:int, db:Session=Depends(get_db), actor:User=Depend
 
 @app.post('/api/admin/assign')
 def assign(data:AssignIn, db:Session=Depends(get_db), actor:User=Depends(admin)):
+    require_permission(actor, 'customers.assign')
     c=db.get(Customer,data.customer_id); u=db.get(User,data.user_id)
     if c and c.is_saved_messages: raise HTTPException(403, 'Saved Messages is private to administrators and cannot be assigned to employees.')
     if not c or not u or not u.active: raise HTTPException(404,'Customer or active user not found')
@@ -617,6 +727,7 @@ def assign(data:AssignIn, db:Session=Depends(get_db), actor:User=Depends(admin))
 
 @app.post('/api/admin/assign/bulk')
 def bulk_assign(data:BulkAssignIn, db:Session=Depends(get_db), actor:User=Depends(admin)):
+    require_permission(actor, 'customers.assign')
     u=db.get(User,data.user_id)
     if not u or not u.active: raise HTTPException(404,'Active user not found')
     if u.role not in ('employee', 'chatting', 'finding'): raise HTTPException(400, 'Customers can only be assigned to Chatting or Finding employees')
@@ -635,6 +746,7 @@ def bulk_assign(data:BulkAssignIn, db:Session=Depends(get_db), actor:User=Depend
 
 @app.post('/api/admin/revoke/{customer_id}')
 def revoke(customer_id:int, db:Session=Depends(get_db), actor:User=Depends(admin)):
+    require_permission(actor, 'customers.assign')
     rows=db.query(Assignment).filter_by(customer_id=customer_id,active=True).all()
     for a in rows: a.active=False; a.revoked_at=datetime.now(timezone.utc)
     db.commit(); audit(db,actor,'customer.revoke','customer',customer_id); return {'ok':True,'revoked':len(rows),'history_preserved':True}
@@ -779,6 +891,7 @@ def delete_tag(tag_id:int, db:Session=Depends(get_db), user:User=Depends(current
 
 @app.get('/api/admin/stats')
 def stats(db:Session=Depends(get_db), actor:User=Depends(admin)):
+    require_permission(actor, 'stats.view')
     now_utc = datetime.now(timezone.utc)
     local_now = datetime.now(ZoneInfo('Asia/Yangon'))
     today_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
@@ -836,6 +949,7 @@ def stats(db:Session=Depends(get_db), actor:User=Depends(admin)):
 
 @app.get('/api/admin/audit')
 def audit_logs(limit:int=100,db:Session=Depends(get_db),actor:User=Depends(admin)):
+    require_permission(actor, 'stats.view')
     rows=db.query(AuditLog).order_by(desc(AuditLog.created_at)).limit(min(limit,500)).all()
     return [{'actor_user_id':r.actor_user_id,'actor_username':(db.get(User, r.actor_user_id).username if r.actor_user_id and db.get(User, r.actor_user_id) else 'System'),'action':r.action,'target_type':r.target_type,'target_id':r.target_id,'detail':r.detail,'created_at':r.created_at.isoformat()} for r in rows]
 
@@ -852,6 +966,7 @@ def readiness(db: Session = Depends(get_db)):
 
 @app.get('/api/admin/diagnostics')
 def diagnostics(db: Session = Depends(get_db), actor: User = Depends(admin)):
+    require_permission(actor, 'stats.view')
     try:
         db.execute(text('SELECT 1'))
         database_status = 'connected'
