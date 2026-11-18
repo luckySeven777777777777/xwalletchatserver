@@ -797,7 +797,17 @@ def messages(cid:int, limit:int=200, before:int|None=None, db:Session=Depends(ge
     if before: q=q.filter(Message.id<before)
     rows=q.order_by(desc(Message.id)).limit(min(max(limit,1),500)).all()[::-1]
     # Never serialize Telegram IDs, peer IDs, usernames, phone numbers or access hashes to employees.
-    return [{'id':m.id,'direction':m.direction,'text':redact(m.body) if user.role not in ('admin','superadmin') else m.body,'sent_at':utc_iso(m.sent_at),'sender':m.sender_label,'media_available':bool(m.media_path and os.path.isfile(os.path.join(UPLOAD_ROOT,m.media_path))),'media_kind':media_kind(m.media_path) if m.media_path else None,'transcript':m.transcript or ''} for m in rows]
+    return [{
+        'id':m.id,
+        'direction':m.direction,
+        'text':redact(m.body) if user.role not in ('admin','superadmin') else m.body,
+        'sent_at':utc_iso(m.sent_at),
+        'sender':m.sender_label,
+        'media_available':bool(m.media_path and os.path.isfile(os.path.join(UPLOAD_ROOT,m.media_path))),
+        'media_kind':media_kind(m.media_path) if m.media_path else None,
+        'media_url':f'/api/messages/{m.id}/media' if m.media_path and os.path.isfile(os.path.join(UPLOAD_ROOT,m.media_path)) else None,
+        'transcript':m.transcript or ''
+    } for m in rows]
 
 @app.get('/api/messages/{mid}/media')
 def message_media(mid:int, db:Session=Depends(get_db), user:User=Depends(current_user)):
@@ -957,7 +967,8 @@ def stats(db:Session=Depends(get_db), actor:User=Depends(admin)):
     local_now = datetime.now(ZoneInfo('Asia/Yangon'))
     today_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
     employee_roles = ('employee', 'chatting', 'finding')
-    users = db.query(User).filter(User.role.in_(employee_roles)).order_by(User.username).all()
+    visible_roles = employee_roles + (('admin',) if actor.role == 'superadmin' else ())
+    users = db.query(User).filter(User.role.in_(visible_roles)).order_by(User.role, User.username).all()
     # A heartbeat is sent every 20 seconds. 90 seconds without one is offline.
     presence_rows = db.query(PresenceSession).all()
     latest_by_user = {}

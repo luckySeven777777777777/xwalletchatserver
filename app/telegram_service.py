@@ -169,7 +169,17 @@ def attach_handlers(account_id: int, client: TelegramClient):
                     customer.telegram_access_hash=str(getattr(sender,'access_hash','') or customer.telegram_access_hash)
                     customer.alias=customer_label(sender)
                 mid = str(event.id)
-                if not db.query(Message).filter_by(customer_id=customer.id, telegram_message_id=mid).first():
+                existing = db.query(Message).filter_by(customer_id=customer.id, telegram_message_id=mid).first()
+                if existing:
+                    # A previous sync may have inserted the text while the volume was full.
+                    # Re-fetch media when the saved path is empty OR points to a missing file.
+                    existing_path = os.path.join(upload_root(), existing.media_path) if existing.media_path else ''
+                    if getattr(event.message, 'media', None) and (not existing_path or not os.path.isfile(existing_path)):
+                        recovered = await save_message_media(account_id, event.message, customer.id)
+                        if recovered:
+                            existing.media_path = os.path.relpath(recovered, upload_root())
+                            db.commit()
+                else:
                     media_path = await save_message_media(account_id, event.message, customer.id)
                     db.add(Message(customer_id=customer.id, telegram_message_id=mid, direction='in', body=event.raw_text or '', media_path=os.path.relpath(media_path, upload_root()) if media_path else '', sent_at=event.date or datetime.now(timezone.utc), sender_label='Customer'))
                     await save_avatar(account_id, customer, sender)
@@ -306,6 +316,8 @@ async def sync_dialog_messages(account_id: int, client: TelegramClient, dialog_r
     """Import recent/full available history for already indexed customer dialogs."""
     db = SessionLocal()
     synced = 0
+    media_recovered = 0
+    media_failed = 0
     errors = []
     try:
         if dialog_rows is None:
@@ -335,11 +347,15 @@ async def sync_dialog_messages(account_id: int, client: TelegramClient, dialog_r
                     # Older sync runs may have stored the text but failed to save
                     # the attachment (for example when the Railway volume was full).
                     if existing:
-                        if not existing.media_path and getattr(msg, 'media', None):
+                        existing_path = os.path.join(upload_root(), existing.media_path) if existing.media_path else ''
+                        if getattr(msg, 'media', None) and (not existing_path or not os.path.isfile(existing_path)):
                             media_path = await save_message_media(account_id, msg, customer_id)
                             if media_path:
                                 existing.media_path = os.path.relpath(media_path, upload_root())
                                 db.commit()
+                                media_recovered += 1
+                            else:
+                                media_failed += 1
                         continue
                     media_path = await save_message_media(account_id, msg, customer_id)
                     db.add(Message(
@@ -354,13 +370,17 @@ async def sync_dialog_messages(account_id: int, client: TelegramClient, dialog_r
                     try:
                         db.commit()
                         synced += 1
+                        if media_path:
+                            media_recovered += 1
+                        elif getattr(msg, 'media', None):
+                            media_failed += 1
                     except IntegrityError:
                         db.rollback()
             except Exception as exc:
                 db.rollback()
                 errors.append(f'{getattr(entity, "id", "unknown")}: {exc}')
                 print('telegram history sync:', repr(exc))
-        return {'messages_synced': synced, 'history_errors': errors}
+        return {'messages_synced': synced, 'media_recovered': media_recovered, 'media_failed': media_failed, 'history_errors': errors}
     finally:
         db.close()
 
