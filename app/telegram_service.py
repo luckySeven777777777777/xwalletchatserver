@@ -1,4 +1,5 @@
 import asyncio, re, os, mimetypes
+from types import SimpleNamespace
 from datetime import datetime, timezone
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
@@ -26,10 +27,13 @@ def customer_label(entity):
 
 async def save_avatar(account_id: int, customer: Customer, entity):
     try:
-        path = os.path.join(upload_root(), f"avatar_{account_id}_{customer.telegram_peer_id}.jpg")
+        root = upload_root()
+        path = os.path.join(root, f"avatar_{account_id}_{customer.telegram_peer_id}.jpg")
         saved = await _clients[account_id].download_profile_photo(entity, file=path)
-        if saved:
-            customer.avatar_path = os.path.relpath(saved, upload_root())
+        if saved and os.path.isfile(saved):
+            customer.avatar_path = os.path.relpath(saved, root)
+        elif os.path.isfile(path):
+            customer.avatar_path = os.path.relpath(path, root)
     except Exception as exc:
         print('telegram avatar sync:', repr(exc))
 
@@ -149,7 +153,12 @@ def attach_handlers(account_id: int, client: TelegramClient):
         except Exception as e: print('telegram incoming handler:', repr(e))
 
 async def collect_dialogs(client: TelegramClient):
-    """Collect all regular and archived dialogs before returning any success result."""
+    """Collect main and archived folders and explicitly include Saved Messages.
+
+    Telethon's folder=0 is the regular chat list and folder=1 is Archived Chats.
+    We preserve folder metadata so the admin CRM can distinguish archived chats.
+    Saved Messages is an account-private dialog and is marked separately.
+    """
     dialogs_by_peer = {}
     for folder in (0, 1):
         try:
@@ -160,7 +169,29 @@ async def collect_dialogs(client: TelegramClient):
             else:
                 break
         for item in folder_dialogs:
-            dialogs_by_peer[str(item.id)] = item
+            peer_key = str(item.id)
+            dialogs_by_peer[peer_key] = SimpleNamespace(
+                id=item.id,
+                entity=item.entity,
+                folder_id=int(getattr(item, 'folder_id', folder) or folder),
+                is_saved_messages=False
+            )
+
+    # Saved Messages may not be returned consistently by get_dialogs() across
+    # Telegram account states / Telethon versions. Add it explicitly by self ID.
+    try:
+        me = await client.get_me()
+        if me and getattr(me, 'id', None):
+            key = str(me.id)
+            dialogs_by_peer[key] = SimpleNamespace(
+                id=me.id,
+                entity=me,
+                folder_id=2,
+                is_saved_messages=True
+            )
+    except Exception as exc:
+        print('telegram saved messages discovery:', repr(exc))
+
     return list(dialogs_by_peer.values())
 
 
@@ -181,7 +212,9 @@ async def sync_dialogs(account_id: int, client: TelegramClient, sync_messages: b
             if getattr(entity, 'bot', False) or not getattr(entity, 'id', None):
                 continue
             peer_id = str(dialog.id)
-            name = ' '.join(filter(None, [
+            is_saved_messages = bool(getattr(dialog, 'is_saved_messages', False))
+            folder_id = 2 if is_saved_messages else int(getattr(dialog, 'folder_id', 0) or 0)
+            name = 'Saved Messages' if is_saved_messages else ' '.join(filter(None, [
                 getattr(entity, 'first_name', ''), getattr(entity, 'last_name', '')
             ])).strip()
             username = getattr(entity, 'username', '') or ''
@@ -196,7 +229,9 @@ async def sync_dialogs(account_id: int, client: TelegramClient, sync_messages: b
                     real_username=username,
                     real_name=name,
                     phone=getattr(entity, 'phone', '') or '',
-                    alias=customer_label(entity)
+                    alias='Saved Messages' if is_saved_messages else customer_label(entity),
+                    dialog_folder=folder_id,
+                    is_saved_messages=is_saved_messages
                 )
                 db.add(customer)
                 db.flush()
@@ -208,7 +243,9 @@ async def sync_dialogs(account_id: int, client: TelegramClient, sync_messages: b
                 customer.telegram_access_hash = str(
                     getattr(entity, 'access_hash', '') or customer.telegram_access_hash
                 )
-                customer.alias = customer_label(entity)
+                customer.alias = 'Saved Messages' if is_saved_messages else customer_label(entity)
+                customer.dialog_folder = folder_id
+                customer.is_saved_messages = is_saved_messages
                 updated += 1
             try:
                 await save_avatar(account_id, customer, entity)
@@ -222,6 +259,8 @@ async def sync_dialogs(account_id: int, client: TelegramClient, sync_messages: b
             'customer_count': len(eligible),
             'created_count': created,
             'updated_count': updated,
+            'archived_count': db.query(Customer).filter_by(account_id=account_id, dialog_folder=1).count(),
+            'saved_messages_included': db.query(Customer).filter_by(account_id=account_id, is_saved_messages=True).count() > 0,
             'messages_synced': 0,
             'history_pending': not sync_messages
         }

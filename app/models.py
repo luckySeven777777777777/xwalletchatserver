@@ -46,6 +46,9 @@ class Customer(Base):
     phone: Mapped[str] = mapped_column(String(80), default='')
     alias: Mapped[str] = mapped_column(String(120), default='')
     avatar_path: Mapped[str] = mapped_column(String(500), default='')
+    # Telegram dialog metadata is admin-visible; Saved Messages is private to admins.
+    dialog_folder: Mapped[int] = mapped_column(Integer, default=0)
+    is_saved_messages: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     __table_args__ = (UniqueConstraint('account_id','telegram_peer_id', name='uq_customer_peer'),)
 

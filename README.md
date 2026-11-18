@@ -200,3 +200,13 @@ In the X-Wallet service Variables, set `DATABASE_URL` to the Railway PostgreSQL 
 - Browser voice notifications use the browser's speech synthesis voices. A female-sounding English voice is selected when the browser provides one; the exact voice depends on the operating system/browser voice pack.
 - Social channel views remain inside the CRM iframe. Platforms that block iframe embedding cannot be forced to render inside the CRM by client-side code.
 - 2FA setup continues to require a valid current authenticator code. The QR rendering was reduced for faster display, but secure enrollment cannot be completed before the employee scans the QR and verifies a code.
+
+
+## v7.6.3 repair notes
+
+- Admin Telegram synchronization now indexes the main chat list, Archived Chats and Saved Messages, and stores dialog-folder metadata.
+- Saved Messages is administrator-private: it is excluded from employee inboxes and assignment operations, and employee access checks reject it even if a stale assignment exists.
+- Admin Telegram account profile refresh persists the latest available account avatar and refreshes it without browser cache.
+- Telegram connected-account cards are placed above the customer list; team management is combined with the Create Team card; the 2FA information card is placed below Social Channels.
+- The migration adds `customers.dialog_folder` and `customers.is_saved_messages` without dropping existing records.
+- Live Telegram sync still requires deployment with valid Telegram credentials and an authorized account. Telegram privacy settings may prevent access to some profile fields or media.

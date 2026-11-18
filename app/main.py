@@ -38,6 +38,10 @@ with engine.begin() as conn:
     customer_columns = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(customers)").fetchall()} if engine.dialect.name == "sqlite" else {row[0] for row in conn.exec_driver_sql("SELECT column_name FROM information_schema.columns WHERE table_name='customers'").fetchall()}
     if "avatar_path" not in customer_columns:
         conn.exec_driver_sql("ALTER TABLE customers ADD COLUMN avatar_path VARCHAR(500) NOT NULL DEFAULT ''")
+    if "dialog_folder" not in customer_columns:
+        conn.exec_driver_sql("ALTER TABLE customers ADD COLUMN dialog_folder INTEGER NOT NULL DEFAULT 0")
+    if "is_saved_messages" not in customer_columns:
+        conn.exec_driver_sql("ALTER TABLE customers ADD COLUMN is_saved_messages BOOLEAN NOT NULL DEFAULT FALSE")
 
     # Additive migration for older PostgreSQL deployments. create_all() does not
     # add columns to an existing table, so this must run before presence queries.
@@ -67,7 +71,7 @@ with SessionLocal() as _migration_db:
         _user.public_id = make_public_user_id(_migration_db)
     _migration_db.commit()
 
-app = FastAPI(title='X-Wallet Chat Management', version='7.6.2')
+app = FastAPI(title='X-Wallet Chat Management', version='7.6.3')
 app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins.split(','), allow_credentials=False, allow_methods=['*'], allow_headers=['*'])
 app.mount('/static', StaticFiles(directory='static'), name='static')
 
@@ -248,6 +252,11 @@ def audit(db, actor, action, typ='', target='', detail=''):
         print('audit write failed:', repr(exc))
 
 def can_access(db: Session, user: User, customer_id: int):
+    customer = db.get(Customer, customer_id)
+    if not customer: return False
+    # Saved Messages is the connected Telegram account owner's private archive.
+    # Never expose it to employee roles, even if a stale assignment exists.
+    if customer.is_saved_messages and user.role not in ('superadmin', 'admin'): return False
     if user.role in ('superadmin','admin'): return True
     return db.query(Assignment).filter_by(customer_id=customer_id,user_id=user.id,active=True).first() is not None
 
@@ -529,28 +538,37 @@ async def admin_sync_telegram_account(account_id: int, db: Session = Depends(get
     # Import message history after returning the complete customer index.
     asyncio.create_task(tg.sync_dialog_messages(account_id, client))
     return {'ok': True, **result, 'customer_count': count,
-            'message': 'All available chat dialogs have been indexed. Message history is importing in the background.'}
+            'message': 'Main chats, archived chats and the account Saved Messages dialog have been indexed. Available message history is importing in the background.'}
 
 @app.get('/api/admin/telegram/accounts/{account_id}/profile')
-async def admin_telegram_account_profile(account_id: int, actor: User = Depends(admin)):
+async def admin_telegram_account_profile(account_id: int, db: Session = Depends(get_db), actor: User = Depends(admin)):
+    account = db.get(TgAccount, account_id)
+    if not account:
+        raise HTTPException(404, 'Telegram account not found.')
     client = tg._clients.get(account_id)
     if not client or not client.is_connected():
         raise HTTPException(409, 'Telegram account is not connected.')
     me = await client.get_me()
     name = ' '.join(filter(None, [getattr(me, 'first_name', ''), getattr(me, 'last_name', '')])).strip()
+    if name:
+        account.label = name[:120]
+        db.commit()
+    os.makedirs(UPLOAD_ROOT, exist_ok=True)
     avatar_file = os.path.join(UPLOAD_ROOT, f'tg_account_{account_id}_avatar.jpg')
-    avatar_available = False
+    avatar_available = os.path.isfile(avatar_file)
     try:
         saved = await client.download_profile_photo(me, file=avatar_file)
-        avatar_available = bool(saved)
-    except Exception:
-        pass
+        avatar_available = bool(saved) or os.path.isfile(avatar_file)
+    except Exception as exc:
+        # Keep the last known avatar if Telegram temporarily cannot return a photo.
+        print('telegram account avatar sync:', repr(exc))
     return {
         'id': getattr(me, 'id', None),
-        'name': name or account_id,
+        'name': name or account.label or str(account_id),
         'username': getattr(me, 'username', '') or '',
         'phone': getattr(me, 'phone', '') or '',
-        'avatar_available': avatar_available
+        'avatar_available': avatar_available,
+        'avatar_url': f'/api/admin/telegram/accounts/{account_id}/avatar?v={int(os.path.getmtime(avatar_file))}' if avatar_available else None
     }
 
 @app.get('/api/admin/telegram/accounts/{account_id}/avatar')
@@ -575,7 +593,8 @@ def admin_customers(account_id:int|None=None, db:Session=Depends(get_db), actor:
         result.append({'id':c.id,'alias':c.alias or c.real_name or ('@'+c.real_username if c.real_username else 'Telegram User'),
             'telegram_username':c.real_username,'telegram_user_id':c.telegram_peer_id,'name':c.real_name,
             'phone':c.phone,'account_id':c.account_id,'avatar_available':bool(c.avatar_path),
-            'assigned_to':assigned})
+            'dialog_folder':c.dialog_folder,'is_archived':c.dialog_folder == 1,
+            'is_saved_messages':bool(c.is_saved_messages),'assigned_to':assigned})
     return result
 
 @app.get('/api/admin/customers/{cid}/avatar')
@@ -588,6 +607,7 @@ def admin_customer_avatar(cid:int, db:Session=Depends(get_db), actor:User=Depend
 @app.post('/api/admin/assign')
 def assign(data:AssignIn, db:Session=Depends(get_db), actor:User=Depends(admin)):
     c=db.get(Customer,data.customer_id); u=db.get(User,data.user_id)
+    if c and c.is_saved_messages: raise HTTPException(403, 'Saved Messages is private to administrators and cannot be assigned to employees.')
     if not c or not u or not u.active: raise HTTPException(404,'Customer or active user not found')
     if u.role not in ('employee', 'chatting', 'finding'): raise HTTPException(400, 'Customers can only be assigned to Chatting or Finding employees')
     # Reassignment revokes old active assignments but never deletes history/messages/tags.
@@ -603,6 +623,7 @@ def bulk_assign(data:BulkAssignIn, db:Session=Depends(get_db), actor:User=Depend
     if not data.customer_ids: raise HTTPException(400, 'Select at least one customer')
     if len(data.customer_ids) > 500: raise HTTPException(400, 'Bulk assignment is limited to 500 customers at a time')
     selected = db.query(Customer).filter(Customer.id.in_(data.customer_ids)).all()
+    if any(c.is_saved_messages for c in selected): raise HTTPException(403, 'Saved Messages cannot be assigned to employees.')
     if len(selected) != len(set(data.customer_ids)) or any(c.account_id != data.account_id for c in selected):
         raise HTTPException(400, 'Every selected customer must belong to the currently selected Telegram account')
     for cid in data.customer_ids:
@@ -622,6 +643,7 @@ def revoke(customer_id:int, db:Session=Depends(get_db), actor:User=Depends(admin
 def inbox(filter:str='all', db:Session=Depends(get_db), user:User=Depends(current_user)):
     q=db.query(Customer)
     if user.role not in ('superadmin','admin'):
+        q=q.filter(Customer.is_saved_messages.is_(False))
         ids=[a.customer_id for a in db.query(Assignment).filter_by(user_id=user.id,active=True).all()]
         q=q.filter(Customer.id.in_(ids) if ids else False)
     result=[]
