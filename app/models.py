@@ -34,6 +34,7 @@ class TgAccount(Base):
     phone_masked: Mapped[str] = mapped_column(String(40), default='')
     session_ciphertext: Mapped[str] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(30), default='connected')
+    assigned_user_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 class Customer(Base):

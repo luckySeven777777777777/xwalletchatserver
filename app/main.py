@@ -31,6 +31,20 @@ def ensure_message_media_columns():
 
 ensure_message_media_columns()
 
+# Link each connected Telegram personal account to the employee responsible for it.
+# Nullable to preserve all existing Telegram account records during upgrade.
+def ensure_telegram_owner_column():
+    with engine.begin() as conn:
+        columns = {col['name'] for col in inspect(conn).get_columns('telegram_accounts')}
+        if 'assigned_user_id' not in columns:
+            conn.execute(text("ALTER TABLE telegram_accounts ADD COLUMN assigned_user_id INTEGER"))
+        try:
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_telegram_accounts_assigned_user_id ON telegram_accounts (assigned_user_id)"))
+        except Exception:
+            pass
+
+ensure_telegram_owner_column()
+
 # Fine-grained delegated-admin permissions. Superadmins always bypass this matrix.
 ADMIN_PERMISSION_KEYS = {
     'users.create_employee', 'users.create_admin', 'users.manage_status',
@@ -651,7 +665,35 @@ def admin_app_url(actor: User = Depends(admin)):
 @app.get('/api/admin/telegram/accounts')
 def telegram_accounts(db:Session=Depends(get_db), actor:User=Depends(admin)):
     if actor.role != 'superadmin' and not ({'telegram.connect','telegram.sync','customers.assign'} & set(user_permissions(actor))): raise HTTPException(403, 'Missing Telegram account permission')
-    return [{'id':a.id,'label':a.label,'phone_masked':a.phone_masked,'status':a.status,'created_at':utc_iso(a.created_at),'customer_count':db.query(Customer).filter_by(account_id=a.id).count()} for a in db.query(TgAccount).order_by(TgAccount.id).all()]
+    rows = db.query(TgAccount).order_by(TgAccount.id).all()
+    owner_ids = {a.assigned_user_id for a in rows if a.assigned_user_id}
+    owners = {u.id: u for u in db.query(User).filter(User.id.in_(owner_ids)).all()} if owner_ids else {}
+    counts = dict(db.query(Customer.account_id, func.count(Customer.id)).group_by(Customer.account_id).all())
+    return [{'id':a.id,'label':a.label,'phone_masked':a.phone_masked,'status':a.status,
+             'created_at':utc_iso(a.created_at),'customer_count':counts.get(a.id,0),
+             'assigned_user_id':a.assigned_user_id,
+             'assigned_username':owners[a.assigned_user_id].username if a.assigned_user_id in owners else None}
+            for a in rows]
+
+@app.put('/api/admin/telegram/accounts/{account_id}/owner')
+def set_telegram_account_owner(account_id: int, data: dict, db: Session = Depends(get_db), actor: User = Depends(admin)):
+    require_permission(actor, 'telegram.connect')
+    account = db.get(TgAccount, account_id)
+    if not account:
+        raise HTTPException(404, 'Telegram account not found')
+    raw_owner = data.get('user_id')
+    owner = db.get(User, int(raw_owner)) if raw_owner not in (None, '', 0, '0') else None
+    if raw_owner not in (None, '', 0, '0'):
+        if not owner or not owner.active or owner.role not in ('employee','chatting','finding'):
+            raise HTTPException(400, 'Choose an active employee account (Chatting or Finding)')
+        if actor.role != 'superadmin' and owner.role == 'admin':
+            raise HTTPException(403, 'Administrators cannot assign Telegram accounts to administrator accounts')
+    account.assigned_user_id = owner.id if owner else None
+    db.commit()
+    audit(db, actor, 'telegram.account.owner_update', 'telegram_account', account_id,
+          f'assigned_user_id={account.assigned_user_id}')
+    return {'ok': True, 'assigned_user_id': account.assigned_user_id,
+            'assigned_username': owner.username if owner else None}
 
 @app.post('/api/admin/telegram/accounts/{account_id}/sync')
 async def admin_sync_telegram_account(account_id: int, db: Session = Depends(get_db), actor: User = Depends(admin)):
@@ -1024,25 +1066,62 @@ def stats(db:Session=Depends(get_db), actor:User=Depends(admin)):
     employee_roles = ('employee', 'chatting', 'finding')
     visible_roles = employee_roles + (('admin',) if actor.role == 'superadmin' else ())
     users = db.query(User).filter(User.role.in_(visible_roles)).order_by(User.role, User.username).all()
-    # A heartbeat is sent every 20 seconds. 90 seconds without one is offline.
-    presence_rows = db.query(PresenceSession).all()
+    user_ids = [u.id for u in users]
+    usernames = [u.username for u in users]
+
+    # Batch-load presence, assignments, message counts and audit activity to avoid
+    # the previous per-user query pattern that became slow as staff grew.
+    presence_rows = (db.query(PresenceSession)
+                     .filter(PresenceSession.user_id.in_(user_ids)).all()) if user_ids else []
     latest_by_user = {}
     for row in presence_rows:
         last = row.last_seen if row.last_seen.tzinfo else row.last_seen.replace(tzinfo=timezone.utc)
         if row.user_id not in latest_by_user or last > latest_by_user[row.user_id][0]:
             latest_by_user[row.user_id] = (last, row)
+
+    assignment_rows = (db.query(Assignment.user_id, Assignment.customer_id, Assignment.assigned_at)
+                       .filter(Assignment.user_id.in_(user_ids), Assignment.active.is_(True)).all()) if user_ids else []
+    assigned_by_user = {}
+    today_received_by_user = {}
+    customer_to_users = {}
+    for uid, cid, assigned_at in assignment_rows:
+        assigned_by_user.setdefault(uid, set()).add(cid)
+        customer_to_users.setdefault(cid, set()).add(uid)
+        stamp = assigned_at if assigned_at and assigned_at.tzinfo else (assigned_at.replace(tzinfo=timezone.utc) if assigned_at else None)
+        if stamp and stamp >= today_start:
+            today_received_by_user[uid] = today_received_by_user.get(uid, 0) + 1
+
+    sent_by_user = dict(db.query(Message.sender_label, func.count(Message.id))
+                        .filter(Message.sender_label.in_(usernames), Message.direction == 'out',
+                                 Message.sent_at >= today_start)
+                        .group_by(Message.sender_label).all()) if usernames else {}
+    inbound_by_customer = dict(db.query(Message.customer_id, func.count(Message.id))
+                               .filter(Message.customer_id.in_(list(customer_to_users) or [-1]),
+                                       Message.direction == 'in', Message.sent_at >= today_start)
+                               .group_by(Message.customer_id).all()) if customer_to_users else {}
+
+    creator_ids = {u.created_by_user_id for u in users if u.created_by_user_id}
+    audit_rows = (db.query(AuditLog).filter(AuditLog.target_type == 'user',
+                                            AuditLog.target_id.in_([str(uid) for uid in user_ids]))
+                  .order_by(desc(AuditLog.created_at)).all()) if user_ids else []
+    last_op_by_user = {}
+    for row in audit_rows:
+        try:
+            target_id = int(row.target_id)
+        except (TypeError, ValueError):
+            continue
+        if target_id not in last_op_by_user and row.actor_user_id != target_id:
+            last_op_by_user[target_id] = row
+    related_user_ids = creator_ids | {r.actor_user_id for r in last_op_by_user.values() if r.actor_user_id}
+    related_users = {u.id: u for u in db.query(User).filter(User.id.in_(related_user_ids)).all()} if related_user_ids else {}
+
     staff = []
     for u in users:
         presence = latest_by_user.get(u.id)
         last_seen, session = presence if presence else (None, None)
         online = bool(session and session.is_active and last_seen and (now_utc - last_seen).total_seconds() <= 90 and u.active)
-        assignments = db.query(Assignment).filter(Assignment.user_id == u.id, Assignment.active.is_(True)).all()
-        assigned_customer_ids = [a.customer_id for a in assignments]
-        today_received = db.query(func.count(func.distinct(Assignment.customer_id))).filter(Assignment.user_id == u.id, Assignment.assigned_at >= today_start).scalar() or 0
-        today_sent = db.query(func.count(Message.id)).filter(Message.sender_label == u.username, Message.direction == 'out', Message.sent_at >= today_start).scalar() or 0
-        today_inbound = 0
-        if assigned_customer_ids:
-            today_inbound = db.query(func.count(Message.id)).filter(Message.customer_id.in_(assigned_customer_ids), Message.direction == 'in', Message.sent_at >= today_start).scalar() or 0
+        assigned_customer_ids = assigned_by_user.get(u.id, set())
+        today_inbound = sum(inbound_by_customer.get(cid, 0) for cid in assigned_customer_ids)
         login_at = session.login_at if session else None
         logout_at = session.logout_at if session else None
         if login_at and login_at.tzinfo is None: login_at = login_at.replace(tzinfo=timezone.utc)
@@ -1051,17 +1130,19 @@ def stats(db:Session=Depends(get_db), actor:User=Depends(admin)):
         offline_base = (session.logout_at if session and session.logout_at else last_seen)
         offline_base = offline_base if not offline_base or offline_base.tzinfo else offline_base.replace(tzinfo=timezone.utc)
         offline_seconds = int(max(0, (now_utc - offline_base).total_seconds())) if (not online and offline_base) else None
-        creator = db.get(User, u.created_by_user_id) if u.created_by_user_id else None
-        last_op = db.query(AuditLog).filter(AuditLog.target_type == 'user', AuditLog.target_id == str(u.id), AuditLog.actor_user_id != u.id).order_by(desc(AuditLog.created_at)).first()
-        operator = db.get(User, last_op.actor_user_id) if last_op and last_op.actor_user_id else None
+        creator = related_users.get(u.created_by_user_id) if u.created_by_user_id else None
+        last_op = last_op_by_user.get(u.id)
+        operator = related_users.get(last_op.actor_user_id) if last_op and last_op.actor_user_id else None
         staff.append({
             'id': u.id, 'public_id': u.public_id, 'username': u.username, 'role': u.role,
             'active': u.active, 'online': online, 'channel': session.channel if session else 'Telegram',
             'login_at': utc_iso(login_at), 'logout_at': utc_iso(logout_at), 'last_seen': utc_iso(last_seen),
             'online_seconds': online_seconds, 'offline_seconds': offline_seconds,
-            'today_received_members': today_received, 'today_member_messages': today_inbound,
-            'today_sent_messages': today_sent, 'assigned_members': len(assigned_customer_ids),
-            'created_at': utc_iso(u.created_at), 'created_by': creator.username if creator else 'System', 'last_operator': operator.username if operator else (creator.username if creator else 'System'), 'last_operation': last_op.action if last_op else 'user.create'
+            'today_received_members': today_received_by_user.get(u.id, 0), 'today_member_messages': today_inbound,
+            'today_sent_messages': sent_by_user.get(u.username, 0), 'assigned_members': len(assigned_customer_ids),
+            'created_at': utc_iso(u.created_at), 'created_by': creator.username if creator else 'System',
+            'last_operator': operator.username if operator else (creator.username if creator else 'System'),
+            'last_operation': last_op.action if last_op else 'user.create'
         })
     active_assignments = db.query(func.count(func.distinct(Assignment.customer_id))).filter(Assignment.active.is_(True)).scalar() or 0
     online_count = sum(1 for item in staff if item['online'])
@@ -1070,7 +1151,7 @@ def stats(db:Session=Depends(get_db), actor:User=Depends(admin)):
     return {
         'employees': len(users), 'online_last_5m': online_count, 'online_members': online_count,
         'active_conversations': active_assignments, 'today_received': today_new,
-        'today_messages': today_messages, 'telegram_accounts': db.query(TgAccount).count(),
+        'today_messages': today_messages, 'telegram_accounts': db.query(func.count(TgAccount.id)).scalar() or 0,
         'staff': staff
     }
 
