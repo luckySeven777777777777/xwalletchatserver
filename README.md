@@ -1,3 +1,7 @@
+## Current release: v7.7.1
+
+See `PATCH_NOTES_v7.7.1.md` for fast admin action behavior and Telegram employee offline notifications.
+
 # Telegram CRM Management (Railway starter)
 
 A deployable first-stage CRM scaffold for ordinary Telegram user accounts using MTProto, with separate admin/employee logins, assignment-based access, employee-private tags, team-shared tags, persistent message storage, and external social-site shortcuts.

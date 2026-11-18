@@ -120,3 +120,19 @@ class PresenceSession(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     channel: Mapped[str] = mapped_column(String(40), default='Telegram')
     __table_args__ = (UniqueConstraint('user_id', 'session_key', name='uq_presence_user_session'),)
+
+
+class EmployeeAlertConfig(Base):
+    __tablename__ = 'employee_alert_config'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    bot_token_ciphertext: Mapped[str] = mapped_column(Text, default='')
+    chat_ids: Mapped[str] = mapped_column(Text, default='[]')
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
+
+class EmployeeAlertState(Base):
+    __tablename__ = 'employee_alert_states'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), unique=True, index=True)
+    offline_key: Mapped[str] = mapped_column(String(80), default='')
+    notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

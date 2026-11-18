@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import desc, text, func, inspect
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from .db import Base, engine, get_db, SessionLocal
-from .models import User, Team, TgAccount, Customer, Assignment, Message, Tag, AuditLog, ReadState, PresenceSession
+from .models import User, Team, TgAccount, Customer, Assignment, Message, Tag, AuditLog, ReadState, PresenceSession, EmployeeAlertConfig, EmployeeAlertState
 from .security import hash_password, verify_password, create_token, decode_token, create_2fa_challenge, encrypt_session, decrypt_session
 from .config import settings
 from . import telegram_service as tg
@@ -143,7 +143,7 @@ with SessionLocal() as _migration_db:
         _user.public_id = make_public_user_id(_migration_db)
     _migration_db.commit()
 
-app = FastAPI(title='X-Wallet Chat Management', version='7.6.6')
+app = FastAPI(title='X-Wallet Chat Management', version='7.7.1')
 # Memory cache prevents connected-account avatar refresh from failing on a full Railway volume.
 _TELEGRAM_ACCOUNT_AVATAR_CACHE: dict[int, bytes] = {}
 app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins.split(','), allow_credentials=False, allow_methods=['*'], allow_headers=['*'])
@@ -162,6 +162,7 @@ class AssignIn(BaseModel): customer_id: int; user_id: int
 class BulkAssignIn(BaseModel): customer_ids: list[int]; user_id: int; account_id: int
 class SendIn(BaseModel): text: str = Field(min_length=1, max_length=4096)
 class TagIn(BaseModel): key: str; value: str; scope: str = 'private'
+class EmployeeAlertConfigIn(BaseModel): bot_token: str = ''; chat_ids: list[str] = Field(default_factory=list); enabled: bool = True
 
 UPLOAD_ROOT = os.path.abspath(settings.upload_dir)
 os.makedirs(UPLOAD_ROOT, exist_ok=True)
@@ -220,10 +221,22 @@ async def startup():
         if settings.admin_password and not db.query(User).filter_by(username=settings.admin_username).first():
             db.add(User(username=settings.admin_username, public_id=make_public_user_id(db), password_hash=hash_password(settings.admin_password), role='superadmin', active=True)); db.commit()
     finally: db.close()
+    app.state.employee_alert_task = asyncio.create_task(employee_offline_alert_loop())
     if settings.telegram_api_id and settings.telegram_api_hash and settings.session_encryption_key:
         # Await restoration so Sync buttons cannot race startup and report a false
         # 'not connected' state while the account is still being rehydrated.
         await tg.restore_clients()
+
+@app.on_event('shutdown')
+async def shutdown_employee_alerts():
+    task = getattr(app.state, 'employee_alert_task', None)
+    if task:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
 
 @app.get('/')
 def home(): return FileResponse('static/index.html')
@@ -704,19 +717,22 @@ async def admin_sync_telegram_account(account_id: int, db: Session = Depends(get
     client = tg._clients.get(account_id)
     if not client or not client.is_connected():
         raise HTTPException(409, 'Telegram account is not connected. Reconnect this account first.')
-    try:
-        # Index every chat first so the admin customer list is populated quickly.
-        result = await tg.sync_dialogs(account_id, client, sync_messages=False)
-    except Exception as exc:
-        db.rollback()
-        raise HTTPException(502, f'Telegram dialog sync failed: {exc}')
+    # Queue Telegram network work and return immediately; the UI can keep responding
+    # while Telegram enumerates dialogs and downloads history.
+    async def run_account_sync(aid, telegram_client):
+        try:
+            result = await tg.sync_dialogs(aid, telegram_client, sync_messages=False)
+            with SessionLocal() as sync_db:
+                count = sync_db.query(Customer).filter_by(account_id=aid).count()
+                audit(sync_db, actor, 'telegram.account.sync', 'telegram_account', aid,
+                      f'customers={count}; dialogs={result.get("dialog_count", 0)}')
+            await tg.sync_dialog_messages(aid, telegram_client)
+        except Exception as exc:
+            print('background Telegram account sync failed:', aid, repr(exc))
+    asyncio.create_task(run_account_sync(account_id, client))
     count = db.query(Customer).filter_by(account_id=account_id).count()
-    audit(db, actor, 'telegram.account.sync', 'telegram_account', account_id,
-          f'customers={count}; dialogs={result.get("dialog_count", 0)}')
-    # Import message history after returning the complete customer index.
-    asyncio.create_task(tg.sync_dialog_messages(account_id, client))
-    return {'ok': True, **result, 'customer_count': count,
-            'message': 'Main chats, archived chats and the account Saved Messages dialog have been indexed. Available message history is importing in the background.'}
+    return {'ok': True, 'queued': True, 'customer_count': count,
+            'message': 'Telegram sync was queued. Existing customers remain available while new chats and history are imported in the background.'}
 
 @app.get('/api/admin/telegram/accounts/{account_id}/profile')
 async def admin_telegram_account_profile(account_id: int, db: Session = Depends(get_db), actor: User = Depends(admin)):
@@ -1056,6 +1072,109 @@ def delete_tag(tag_id:int, db:Session=Depends(get_db), user:User=Depends(current
     allowed=user.role in ('admin','superadmin') or (tag.scope=='private' and tag.owner_user_id==user.id) or (tag.scope=='team' and tag.team_id==user.team_id)
     if not allowed: raise HTTPException(403,'Cannot delete another employee private tag')
     db.delete(tag); db.commit(); audit(db,user,'tag.delete','tag',tag_id); return {'ok':True}
+
+@app.get('/api/admin/alerts/offline-config')
+def get_employee_offline_alert_config(db: Session = Depends(get_db), actor: User = Depends(superadmin)):
+    row = db.get(EmployeeAlertConfig, 1)
+    chat_ids = []
+    if row:
+        try: chat_ids = json.loads(row.chat_ids or '[]')
+        except Exception: chat_ids = []
+    return {'enabled': bool(row.enabled) if row else False, 'chat_ids': chat_ids,
+            'bot_token_configured': bool(row and row.bot_token_ciphertext)}
+
+@app.put('/api/admin/alerts/offline-config')
+def save_employee_offline_alert_config(data: EmployeeAlertConfigIn, db: Session = Depends(get_db), actor: User = Depends(superadmin)):
+    chat_ids = list(dict.fromkeys(str(v).strip() for v in data.chat_ids if str(v).strip()))
+    if any(not re.fullmatch(r'-?\d+', value) for value in chat_ids):
+        raise HTTPException(400, 'Chat IDs must be numeric Telegram chat IDs.')
+    if len(chat_ids) > 30:
+        raise HTTPException(400, 'You can configure up to 30 Telegram chat IDs.')
+    row = db.get(EmployeeAlertConfig, 1)
+    if row is None:
+        row = EmployeeAlertConfig(id=1, bot_token_ciphertext='', chat_ids='[]', enabled=False)
+        db.add(row)
+    token = (data.bot_token or '').strip()
+    if token:
+        if not re.fullmatch(r'\d{5,15}:[A-Za-z0-9_-]{20,}', token):
+            raise HTTPException(400, 'Telegram Bot Token format is invalid.')
+        try: row.bot_token_ciphertext = encrypt_session(token)
+        except Exception as exc: raise HTTPException(500, f'Cannot encrypt bot token: {exc}')
+    row.chat_ids = json.dumps(chat_ids)
+    row.enabled = bool(data.enabled)
+    db.commit()
+    audit(db, actor, 'employee.offline_alert_config.update', 'settings', 'employee_offline_alert', f'enabled={row.enabled}; recipients={len(chat_ids)}')
+    return {'ok': True, 'enabled': row.enabled, 'chat_ids': chat_ids, 'bot_token_configured': bool(row.bot_token_ciphertext)}
+
+async def employee_offline_alert_loop():
+    """Poll presence and send one Telegram alert per offline episode during Myanmar night hours."""
+    import httpx
+    tz = ZoneInfo('Asia/Yangon')
+    while True:
+        try:
+            now_local = datetime.now(tz)
+            in_window = (now_local.hour > 20 or (now_local.hour == 20 and now_local.minute >= 30) or now_local.hour < 9 or (now_local.hour == 9 and now_local.minute < 30))
+            if in_window:
+                with SessionLocal() as db:
+                    cfg = db.get(EmployeeAlertConfig, 1)
+                    if cfg and cfg.enabled and cfg.bot_token_ciphertext:
+                        try:
+                            bot_token = decrypt_session(cfg.bot_token_ciphertext)
+                            recipients = json.loads(cfg.chat_ids or '[]')
+                        except Exception:
+                            bot_token, recipients = '', []
+                        if bot_token and recipients:
+                            users = db.query(User).filter(User.active.is_(True), User.role.in_(('employee','chatting','finding','admin'))).all()
+                            for user in users:
+                                sessions = db.query(PresenceSession).filter(PresenceSession.user_id == user.id).order_by(desc(PresenceSession.last_seen)).all()
+                                if not sessions:
+                                    continue
+                                latest = sessions[0]
+                                last_seen = latest.last_seen
+                                if last_seen.tzinfo is None: last_seen = last_seen.replace(tzinfo=timezone.utc)
+                                online = latest.is_active and (datetime.now(timezone.utc) - last_seen).total_seconds() <= 90
+                                state = db.query(EmployeeAlertState).filter_by(user_id=user.id).first()
+                                if online:
+                                    if state and state.offline_key:
+                                        state.offline_key = ''
+                                        state.notified_at = None
+                                    continue
+                                offline_since = latest.logout_at or last_seen
+                                if offline_since.tzinfo is None: offline_since = offline_since.replace(tzinfo=timezone.utc)
+                                elapsed = (datetime.now(timezone.utc) - offline_since).total_seconds()
+                                if elapsed < 600:
+                                    continue
+                                event_key = offline_since.astimezone(timezone.utc).isoformat(timespec='seconds')
+                                if state and state.offline_key == event_key and state.notified_at:
+                                    continue
+                                since_local = offline_since.astimezone(tz)
+                                duration_minutes = int(elapsed // 60)
+                                duration_text = f'{duration_minutes // 60}h {duration_minutes % 60}m' if duration_minutes >= 60 else f'{duration_minutes} minutes'
+                                message = (f'Employee: {user.username}\nStatus: Offline\nOffline since: {since_local.strftime("%Y-%m-%d %H:%M:%S")} (MMT)\n'
+                                           f'Offline duration: {duration_text}\nAlert time: {now_local.strftime("%Y-%m-%d %H:%M:%S")} (MMT)')
+                                delivered = bool(recipients)
+                                async with httpx.AsyncClient(timeout=4.0) as client:
+                                    for chat_id in recipients:
+                                        try:
+                                            resp = await client.post(f'https://api.telegram.org/bot{bot_token}/sendMessage', json={'chat_id': chat_id, 'text': message})
+                                            resp.raise_for_status()
+                                            if not resp.json().get('ok'): delivered = False
+                                        except Exception as exc:
+                                            delivered = False
+                                            print('employee offline alert delivery failed:', repr(exc))
+                                if delivered:
+                                    if state is None:
+                                        state = EmployeeAlertState(user_id=user.id, offline_key=event_key, notified_at=datetime.now(timezone.utc))
+                                        db.add(state)
+                                    else:
+                                        state.offline_key = event_key
+                                        state.notified_at = datetime.now(timezone.utc)
+                            db.commit()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print('employee offline alert monitor error:', repr(exc))
+        await asyncio.sleep(60)
 
 @app.get('/api/admin/stats')
 def stats(db:Session=Depends(get_db), actor:User=Depends(admin)):
