@@ -18,3 +18,7 @@ class Settings:
     upload_dir: str = os.getenv("UPLOAD_DIR") or ("/data/uploads" if os.path.isdir("/data") else "./uploads")
 
 settings = Settings()
+# Never silently run a Railway production deployment on an ephemeral SQLite file.
+# Link the Postgres service's DATABASE_URL to this service in Railway Variables.
+if (os.getenv('RAILWAY_ENVIRONMENT') or os.getenv('RAILWAY_PROJECT_ID')) and not os.getenv('DATABASE_URL'):
+    raise RuntimeError('DATABASE_URL is missing. In Railway, add a variable reference from the Postgres service: DATABASE_URL -> DATABASE_URL.')

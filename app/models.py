@@ -15,6 +15,7 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(String(255))
     role: Mapped[str] = mapped_column(String(20), default='employee')
     team_id: Mapped[int | None] = mapped_column(ForeignKey('teams.id'), nullable=True)
+    created_by_user_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     last_seen: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -98,3 +99,16 @@ class AuditLog(Base):
     target_id: Mapped[str] = mapped_column(String(100), default='')
     detail: Mapped[str] = mapped_column(Text, default='')
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class PresenceSession(Base):
+    __tablename__ = 'presence_sessions'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    session_key: Mapped[str] = mapped_column(String(120))
+    login_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    last_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    logout_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    channel: Mapped[str] = mapped_column(String(40), default='Telegram')
+    __table_args__ = (UniqueConstraint('user_id', 'session_key', name='uq_presence_user_session'),)

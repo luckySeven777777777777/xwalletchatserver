@@ -9,12 +9,13 @@ from sqlalchemy.orm import Session
 from sqlalchemy import desc, text, func
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from .db import Base, engine, get_db, SessionLocal
-from .models import User, Team, TgAccount, Customer, Assignment, Message, Tag, AuditLog, ReadState
+from .models import User, Team, TgAccount, Customer, Assignment, Message, Tag, AuditLog, ReadState, PresenceSession
 from .security import hash_password, verify_password, create_token, decode_token, create_2fa_challenge, encrypt_session, decrypt_session
 from .config import settings
 from . import telegram_service as tg
 import pyotp, qrcode
 from io import BytesIO
+from zoneinfo import ZoneInfo
 
 Base.metadata.create_all(bind=engine)
 
@@ -29,6 +30,8 @@ with engine.begin() as conn:
     if "totp_enabled" not in columns:
         conn.exec_driver_sql("ALTER TABLE users ADD COLUMN totp_enabled BOOLEAN NOT NULL DEFAULT FALSE")
     conn.exec_driver_sql("CREATE UNIQUE INDEX IF NOT EXISTS ix_users_public_id ON users (public_id)")
+    if "created_by_user_id" not in columns:
+        conn.exec_driver_sql("ALTER TABLE users ADD COLUMN created_by_user_id INTEGER")
     customer_columns = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(customers)").fetchall()} if engine.dialect.name == "sqlite" else {row[0] for row in conn.exec_driver_sql("SELECT column_name FROM information_schema.columns WHERE table_name='customers'").fetchall()}
     if "avatar_path" not in customer_columns:
         conn.exec_driver_sql("ALTER TABLE customers ADD COLUMN avatar_path VARCHAR(500) NOT NULL DEFAULT ''")
@@ -45,7 +48,7 @@ with SessionLocal() as _migration_db:
         _user.public_id = make_public_user_id(_migration_db)
     _migration_db.commit()
 
-app = FastAPI(title='X-Wallet Chat Management', version='7.5.0')
+app = FastAPI(title='X-Wallet Chat Management', version='7.6.0')
 app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins.split(','), allow_credentials=False, allow_methods=['*'], allow_headers=['*'])
 app.mount('/static', StaticFiles(directory='static'), name='static')
 
@@ -71,6 +74,28 @@ def utc_iso(value):
     if value is None: return None
     if value.tzinfo is None: value = value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc).isoformat()
+
+def touch_presence(db: Session, user: User, session_key: str, *, login: bool = False, logout: bool = False):
+    key = (session_key or 'default')[:120]
+    now_utc = datetime.now(timezone.utc)
+    row = db.query(PresenceSession).filter_by(user_id=user.id, session_key=key).first()
+    if row is None:
+        row = PresenceSession(user_id=user.id, session_key=key, login_at=now_utc, last_seen=now_utc, is_active=True)
+        db.add(row)
+    else:
+        row.last_seen = now_utc
+        if login:
+            row.login_at = now_utc
+            row.logout_at = None
+            row.is_active = True
+        if logout:
+            row.logout_at = now_utc
+            row.is_active = False
+    if logout and row is None:
+        return
+    user.last_seen = now_utc
+    db.commit()
+    return row
 
 def media_kind(path):
     mime = mimetypes.guess_type(path or '')[0] or ''
@@ -113,7 +138,7 @@ def finding_login_link(username: str):
     return FileResponse('static/index.html')
 
 @app.post('/api/auth/login')
-def login(data: LoginIn, db: Session = Depends(get_db)):
+def login(data: LoginIn, request: Request, db: Session = Depends(get_db)):
     # Employee links may preserve mixed-case usernames. Resolve usernames
     # case-insensitively and trim only the username (never the password).
     submitted_username = data.username.strip()
@@ -153,11 +178,13 @@ def login(data: LoginIn, db: Session = Depends(get_db)):
             raise HTTPException(401, 'Invalid username or password. Ask an administrator to verify the account is active and reset its password if needed.')
     if user.totp_enabled:
         return {'requires_2fa': True, 'challenge_token': create_2fa_challenge(user.id), 'username': user.username}
-    user.last_seen = datetime.now(timezone.utc); db.commit()
-    return {'token': create_token(user.id,user.role), 'user': {'id':user.id,'public_id':user.public_id,'username':user.username,'role':user.role,'team_id':user.team_id,'totp_enabled':user.totp_enabled}}
+    session_key = request.headers.get('x-session-key') or secrets.token_urlsafe(24)
+    touch_presence(db, user, session_key, login=True)
+    audit(db, user, 'auth.login', 'user', user.id, f'role={user.role}')
+    return {'token': create_token(user.id,user.role), 'session_key': session_key, 'user': {'id':user.id,'public_id':user.public_id,'username':user.username,'role':user.role,'team_id':user.team_id,'totp_enabled':user.totp_enabled}}
 
 @app.post('/api/auth/2fa/verify')
-def verify_login_2fa(data: TwoFactorVerifyIn, db: Session = Depends(get_db)):
+def verify_login_2fa(data: TwoFactorVerifyIn, request: Request, db: Session = Depends(get_db)):
     payload = decode_token(data.challenge_token)
     if not payload or payload.get('purpose') != '2fa_login':
         raise HTTPException(401, 'Two-factor login challenge expired. Please sign in again.')
@@ -166,8 +193,10 @@ def verify_login_2fa(data: TwoFactorVerifyIn, db: Session = Depends(get_db)):
         raise HTTPException(401, 'Two-factor account is unavailable.')
     if not pyotp.TOTP(decrypt_session(user.totp_secret)).verify(data.code.strip(), valid_window=1):
         raise HTTPException(401, 'Invalid 2FA code. Check the code and try again.')
-    user.last_seen = datetime.now(timezone.utc); db.commit()
-    return {'token': create_token(user.id,user.role), 'user': {'id':user.id,'public_id':user.public_id,'username':user.username,'role':user.role,'team_id':user.team_id,'totp_enabled':True}}
+    session_key = request.headers.get('x-session-key') or secrets.token_urlsafe(24)
+    touch_presence(db, user, session_key, login=True)
+    audit(db, user, 'auth.login_2fa', 'user', user.id, f'role={user.role}')
+    return {'token': create_token(user.id,user.role), 'session_key': session_key, 'user': {'id':user.id,'public_id':user.public_id,'username':user.username,'role':user.role,'team_id':user.team_id,'totp_enabled':True}}
 
 def current_user(authorization: str | None = Header(default=None), db: Session = Depends(get_db)):
     if not authorization or not authorization.startswith('Bearer '): raise HTTPException(401,'Login required')
@@ -221,6 +250,41 @@ def redact(text: str):
 def me(user: User = Depends(current_user)):
     return {'id':user.id,'public_id':user.public_id,'username':user.username,'role':user.role,'team_id':user.team_id,'totp_enabled':user.totp_enabled}
 
+@app.post('/api/presence/heartbeat')
+def presence_heartbeat(request: Request, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    key = request.headers.get('x-session-key') or 'default'
+    touch_presence(db, user, key)
+    return {'ok': True, 'server_time': utc_iso(datetime.now(timezone.utc))}
+
+@app.post('/api/presence/channel')
+def presence_channel(data: dict, request: Request, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    channel = str(data.get('channel') or 'Telegram')[:40]
+    allowed = {'Telegram', 'WhatsApp', 'Instagram', 'TikTok', 'LINE'}
+    if channel not in allowed:
+        raise HTTPException(400, 'Unsupported social channel')
+    key = request.headers.get('x-session-key') or 'default'
+    row = db.query(PresenceSession).filter_by(user_id=user.id, session_key=key).first()
+    if not row:
+        row = PresenceSession(user_id=user.id, session_key=key, channel=channel)
+        db.add(row)
+    row.channel = channel
+    row.last_seen = datetime.now(timezone.utc)
+    row.is_active = True
+    db.commit()
+    return {'ok': True, 'channel': channel}
+
+@app.post('/api/presence/logout')
+def presence_logout(request: Request, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    key = request.headers.get('x-session-key') or 'default'
+    row = db.query(PresenceSession).filter_by(user_id=user.id, session_key=key, is_active=True).first()
+    if row:
+        row.logout_at = datetime.now(timezone.utc)
+        row.last_seen = row.logout_at
+        row.is_active = False
+        db.commit()
+    audit(db, user, 'auth.logout', 'user', user.id)
+    return {'ok': True}
+
 @app.post('/api/security/2fa/setup')
 def setup_2fa(db: Session = Depends(get_db), user: User = Depends(admin)):
     if user.totp_enabled:
@@ -230,7 +294,7 @@ def setup_2fa(db: Session = Depends(get_db), user: User = Depends(admin)):
     db.commit()
     account_label = f"X-Wallet · {user.username}"
     uri = pyotp.TOTP(secret).provisioning_uri(name=user.username, issuer_name='X-Wallet')
-    qr = qrcode.QRCode(box_size=6, border=3)
+    qr = qrcode.QRCode(box_size=4, border=2)
     qr.add_data(uri); qr.make(fit=True)
     image = qr.make_image(fill_color='black', back_color='white')
     buffer = BytesIO(); image.save(buffer, format='PNG')
@@ -272,7 +336,7 @@ def admin_setup_user_2fa(uid: int, db: Session = Depends(get_db), actor: User = 
     issuer = 'X-Wallet'
     account_name = f'{issuer} ({target.username})'
     uri = pyotp.TOTP(secret).provisioning_uri(name=target.username, issuer_name=issuer)
-    qr = qrcode.QRCode(box_size=6, border=3)
+    qr = qrcode.QRCode(box_size=4, border=2)
     qr.add_data(uri); qr.make(fit=True)
     image = qr.make_image(fill_color='black', back_color='white')
     buffer = BytesIO(); image.save(buffer, format='PNG')
@@ -309,7 +373,7 @@ def admin_reset_user_2fa(uid: int, db: Session = Depends(get_db), actor: User = 
 
 @app.get('/api/admin/users')
 def list_users(db: Session = Depends(get_db), actor: User = Depends(admin)):
-    return [{'id':u.id,'public_id':u.public_id,'username':u.username,'role':u.role,'team_id':u.team_id,'active':u.active,'totp_enabled':u.totp_enabled,'created_at':u.created_at.isoformat(),'last_seen':u.last_seen.isoformat() if u.last_seen else None} for u in db.query(User).order_by(User.id).all()]
+    return [{'id':u.id,'public_id':u.public_id,'username':u.username,'role':u.role,'team_id':u.team_id,'active':u.active,'totp_enabled':u.totp_enabled,'created_at':u.created_at.isoformat(),'last_seen':u.last_seen.isoformat() if u.last_seen else None,'created_by_user_id':u.created_by_user_id} for u in db.query(User).order_by(User.id).all()]
 
 @app.post('/api/admin/users')
 def create_user(data: UserIn, request: Request, db: Session = Depends(get_db), actor: User = Depends(admin)):
@@ -329,7 +393,7 @@ def create_user(data: UserIn, request: Request, db: Session = Depends(get_db), a
     try:
         u = User(username=username, public_id=make_public_user_id(db),
                  password_hash=hash_password(data.password), role=data.role,
-                 team_id=data.team_id, active=True)
+                 team_id=data.team_id, created_by_user_id=actor.id, active=True)
         db.add(u)
         db.flush()
         db.commit()
@@ -662,21 +726,65 @@ def delete_tag(tag_id:int, db:Session=Depends(get_db), user:User=Depends(current
 
 @app.get('/api/admin/stats')
 def stats(db:Session=Depends(get_db), actor:User=Depends(admin)):
-    today=datetime.now(timezone.utc).date()
-    users=db.query(User).all(); active_assignments=db.query(Assignment).filter_by(active=True).count()
-    online=0
-    now_utc=datetime.now(timezone.utc)
+    now_utc = datetime.now(timezone.utc)
+    local_now = datetime.now(ZoneInfo('Asia/Yangon'))
+    today_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
+    employee_roles = ('employee', 'chatting', 'finding')
+    users = db.query(User).filter(User.role.in_(employee_roles)).order_by(User.username).all()
+    # A heartbeat is sent every 20 seconds. 90 seconds without one is offline.
+    presence_rows = db.query(PresenceSession).all()
+    latest_by_user = {}
+    for row in presence_rows:
+        last = row.last_seen if row.last_seen.tzinfo else row.last_seen.replace(tzinfo=timezone.utc)
+        if row.user_id not in latest_by_user or last > latest_by_user[row.user_id][0]:
+            latest_by_user[row.user_id] = (last, row)
+    staff = []
     for u in users:
-        if not u.last_seen: continue
-        last_seen=u.last_seen if u.last_seen.tzinfo else u.last_seen.replace(tzinfo=timezone.utc)
-        if (now_utc-last_seen).total_seconds()<300: online+=1
-    employee_roles=('employee','chatting','finding')
-    return {'employees':len([u for u in users if u.role in employee_roles]),'online_last_5m':online,'active_conversations':active_assignments,'today_received':db.query(Assignment).filter(Assignment.assigned_at>=datetime.combine(today,datetime.min.time(),tzinfo=timezone.utc)).count(),'telegram_accounts':db.query(TgAccount).count()}
+        presence = latest_by_user.get(u.id)
+        last_seen, session = presence if presence else (None, None)
+        online = bool(session and session.is_active and last_seen and (now_utc - last_seen).total_seconds() <= 90 and u.active)
+        assignments = db.query(Assignment).filter(Assignment.user_id == u.id, Assignment.active.is_(True)).all()
+        assigned_customer_ids = [a.customer_id for a in assignments]
+        today_received = db.query(func.count(func.distinct(Assignment.customer_id))).filter(Assignment.user_id == u.id, Assignment.assigned_at >= today_start).scalar() or 0
+        today_sent = db.query(func.count(Message.id)).filter(Message.sender_label == u.username, Message.direction == 'out', Message.sent_at >= today_start).scalar() or 0
+        today_inbound = 0
+        if assigned_customer_ids:
+            today_inbound = db.query(func.count(Message.id)).filter(Message.customer_id.in_(assigned_customer_ids), Message.direction == 'in', Message.sent_at >= today_start).scalar() or 0
+        login_at = session.login_at if session else None
+        logout_at = session.logout_at if session else None
+        if login_at and login_at.tzinfo is None: login_at = login_at.replace(tzinfo=timezone.utc)
+        if logout_at and logout_at.tzinfo is None: logout_at = logout_at.replace(tzinfo=timezone.utc)
+        online_seconds = int(max(0, ((now_utc if online else (logout_at or last_seen)) - login_at).total_seconds())) if login_at and (online or logout_at or last_seen) else 0
+        offline_base = (session.logout_at if session and session.logout_at else last_seen)
+        offline_base = offline_base if not offline_base or offline_base.tzinfo else offline_base.replace(tzinfo=timezone.utc)
+        offline_seconds = int(max(0, (now_utc - offline_base).total_seconds())) if (not online and offline_base) else None
+        creator = db.get(User, u.created_by_user_id) if u.created_by_user_id else None
+        last_op = db.query(AuditLog).filter(AuditLog.target_type == 'user', AuditLog.target_id == str(u.id), AuditLog.actor_user_id != u.id).order_by(desc(AuditLog.created_at)).first()
+        operator = db.get(User, last_op.actor_user_id) if last_op and last_op.actor_user_id else None
+        staff.append({
+            'id': u.id, 'public_id': u.public_id, 'username': u.username, 'role': u.role,
+            'active': u.active, 'online': online, 'channel': session.channel if session else 'Telegram',
+            'login_at': utc_iso(login_at), 'logout_at': utc_iso(logout_at), 'last_seen': utc_iso(last_seen),
+            'online_seconds': online_seconds, 'offline_seconds': offline_seconds,
+            'today_received_members': today_received, 'today_member_messages': today_inbound,
+            'today_sent_messages': today_sent, 'assigned_members': len(assigned_customer_ids),
+            'created_at': utc_iso(u.created_at), 'created_by': creator.username if creator else 'System', 'last_operator': operator.username if operator else (creator.username if creator else 'System'), 'last_operation': last_op.action if last_op else 'user.create'
+        })
+    active_assignments = db.query(func.count(func.distinct(Assignment.customer_id))).filter(Assignment.active.is_(True)).scalar() or 0
+    online_count = sum(1 for item in staff if item['online'])
+    today_new = db.query(func.count(Assignment.id)).filter(Assignment.assigned_at >= today_start).scalar() or 0
+    today_messages = db.query(func.count(Message.id)).filter(Message.sent_at >= today_start).scalar() or 0
+    return {
+        'employees': len(users), 'online_last_5m': online_count, 'online_members': online_count,
+        'active_conversations': active_assignments, 'today_received': today_new,
+        'today_messages': today_messages, 'telegram_accounts': db.query(TgAccount).count(),
+        'staff': staff
+    }
 
 @app.get('/api/admin/audit')
 def audit_logs(limit:int=100,db:Session=Depends(get_db),actor:User=Depends(admin)):
     rows=db.query(AuditLog).order_by(desc(AuditLog.created_at)).limit(min(limit,500)).all()
-    return [{'actor_user_id':r.actor_user_id,'action':r.action,'target_type':r.target_type,'target_id':r.target_id,'detail':r.detail,'created_at':r.created_at.isoformat()} for r in rows]
+    return [{'actor_user_id':r.actor_user_id,'actor_username':(db.get(User, r.actor_user_id).username if r.actor_user_id and db.get(User, r.actor_user_id) else 'System'),'action':r.action,'target_type':r.target_type,'target_id':r.target_id,'detail':r.detail,'created_at':r.created_at.isoformat()} for r in rows]
 
 @app.get('/api/health')
 def health(): return {'ok':True,'service':'telegram-crm'}
@@ -687,7 +795,7 @@ def readiness(db: Session = Depends(get_db)):
         db.execute(text('SELECT 1'))
     except Exception as exc:
         raise HTTPException(503, f'Database is not ready: {type(exc).__name__}')
-    return {'ok': True, 'database': 'connected'}
+    return {'ok': True, 'database': 'connected', 'database_dialect': engine.dialect.name}
 
 @app.get('/api/admin/diagnostics')
 def diagnostics(db: Session = Depends(get_db), actor: User = Depends(admin)):
@@ -699,6 +807,8 @@ def diagnostics(db: Session = Depends(get_db), actor: User = Depends(admin)):
     accounts = db.query(TgAccount).all() if database_status == 'connected' else []
     return {
         'database': database_status,
+        'database_dialect': engine.dialect.name,
+        'database_url_configured': bool(os.getenv('DATABASE_URL')),
         'telegram_api_configured': bool(settings.telegram_api_id and settings.telegram_api_hash),
         'session_encryption_configured': bool(settings.session_encryption_key),
         'telegram_accounts_total': len(accounts),
