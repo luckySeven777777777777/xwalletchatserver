@@ -1,5 +1,6 @@
 import asyncio, re, secrets, os, uuid, mimetypes, base64, hmac
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 from fastapi import FastAPI, Depends, HTTPException, Header, UploadFile, File, Form, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -9,7 +10,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import desc, text, func
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from .db import Base, engine, get_db, SessionLocal
-from .models import User, Team, TgAccount, Customer, Assignment, Message, Tag, AuditLog, ReadState
+from .models import User, Team, TgAccount, Customer, Assignment, Message, Tag, AuditLog, ReadState, PresenceSession, Notification
 from .security import hash_password, verify_password, create_token, decode_token, create_2fa_challenge, encrypt_session, decrypt_session
 from .config import settings
 from . import telegram_service as tg
@@ -32,6 +33,9 @@ with engine.begin() as conn:
     customer_columns = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(customers)").fetchall()} if engine.dialect.name == "sqlite" else {row[0] for row in conn.exec_driver_sql("SELECT column_name FROM information_schema.columns WHERE table_name='customers'").fetchall()}
     if "avatar_path" not in customer_columns:
         conn.exec_driver_sql("ALTER TABLE customers ADD COLUMN avatar_path VARCHAR(500) NOT NULL DEFAULT ''")
+    message_columns = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(messages)").fetchall()} if engine.dialect.name == "sqlite" else {row[0] for row in conn.exec_driver_sql("SELECT column_name FROM information_schema.columns WHERE table_name='messages'").fetchall()}
+    if "sender_user_id" not in message_columns:
+        conn.exec_driver_sql("ALTER TABLE messages ADD COLUMN sender_user_id INTEGER REFERENCES users(id)")
 
 def make_public_user_id(db):
     for _ in range(200):
@@ -45,7 +49,7 @@ with SessionLocal() as _migration_db:
         _user.public_id = make_public_user_id(_migration_db)
     _migration_db.commit()
 
-app = FastAPI(title='X-Wallet Chat Management', version='7.5.0')
+app = FastAPI(title='X-Wallet Chat Management', version='7.6.0')
 app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins.split(','), allow_credentials=False, allow_methods=['*'], allow_headers=['*'])
 app.mount('/static', StaticFiles(directory='static'), name='static')
 
@@ -61,6 +65,8 @@ class AssignIn(BaseModel): customer_id: int; user_id: int
 class BulkAssignIn(BaseModel): customer_ids: list[int]; user_id: int; account_id: int
 class SendIn(BaseModel): text: str = Field(min_length=1, max_length=4096)
 class TagIn(BaseModel): key: str; value: str; scope: str = 'private'
+class PresenceIn(BaseModel): session_id: str = Field(min_length=8, max_length=100)
+class ChannelEventIn(BaseModel): channel: str
 
 UPLOAD_ROOT = os.path.abspath(settings.upload_dir)
 os.makedirs(UPLOAD_ROOT, exist_ok=True)
@@ -217,6 +223,65 @@ def redact(text: str):
     text = re.sub(r'(?<!\w)\+?\d[\d ()-]{7,}\d', '[PHONE_NUMBER_HIDDEN]', text)
     return text
 
+@app.post('/api/presence/heartbeat')
+def presence_heartbeat(data: PresenceIn, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    now_utc = datetime.now(timezone.utc)
+    row = db.query(PresenceSession).filter_by(user_id=user.id, session_key=data.session_id).first()
+    if row is None:
+        row = PresenceSession(user_id=user.id, session_key=data.session_id, login_at=now_utc, last_seen=now_utc, is_active=True)
+        db.add(row)
+        audit(db, user, 'session.login', 'user', user.id, 'browser_session_started')
+    else:
+        row.last_seen = now_utc
+        row.is_active = True
+        row.logout_at = None
+    user.last_seen = now_utc
+    db.commit()
+    return {'ok': True, 'server_time': now_utc.isoformat()}
+
+@app.post('/api/presence/logout')
+def presence_logout(data: PresenceIn, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    now_utc = datetime.now(timezone.utc)
+    row = db.query(PresenceSession).filter_by(user_id=user.id, session_key=data.session_id).first()
+    if row:
+        row.is_active = False
+        row.logout_at = now_utc
+        row.last_seen = now_utc
+    audit(db, user, 'session.logout', 'user', user.id, 'browser_session_ended')
+    db.commit()
+    return {'ok': True}
+
+@app.get('/api/notifications')
+def employee_notifications(db: Session = Depends(get_db), user: User = Depends(current_user)):
+    if user.role in ('admin', 'superadmin'):
+        return {'count': 0, 'items': []}
+    rows = db.query(Notification).filter_by(user_id=user.id).order_by(desc(Notification.created_at)).limit(40).all()
+    unread_count = db.query(Notification).filter_by(user_id=user.id, read_at=None).count()
+    return {'count': unread_count, 'items': [{'id':n.id,'customer_id':n.customer_id,'title':n.title,'body':n.body,'kind':n.kind,'created_at':utc_iso(n.created_at),'read':n.read_at is not None} for n in rows]}
+
+@app.post('/api/notifications/{notification_id}/read')
+def mark_notification_read(notification_id: int, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    row = db.query(Notification).filter_by(id=notification_id, user_id=user.id).first()
+    if row and row.read_at is None:
+        row.read_at = datetime.now(timezone.utc)
+        db.commit()
+    return {'ok': True}
+
+@app.post('/api/notifications/read-all')
+def mark_all_notifications_read(db: Session = Depends(get_db), user: User = Depends(current_user)):
+    db.query(Notification).filter_by(user_id=user.id, read_at=None).update({Notification.read_at: datetime.now(timezone.utc)})
+    db.commit()
+    return {'ok': True}
+
+@app.post('/api/activity/channel')
+def record_channel_activity(data: ChannelEventIn, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    allowed = {'telegram','whatsapp','instagram','tiktok','line'}
+    channel = data.channel.lower().strip()
+    if channel not in allowed:
+        raise HTTPException(400, 'Unsupported social channel')
+    audit(db, user, 'channel.open', 'channel', channel, 'opened_inside_crm')
+    return {'ok': True}
+
 @app.get('/api/me')
 def me(user: User = Depends(current_user)):
     return {'id':user.id,'public_id':user.public_id,'username':user.username,'role':user.role,'team_id':user.team_id,'totp_enabled':user.totp_enabled}
@@ -228,9 +293,9 @@ def setup_2fa(db: Session = Depends(get_db), user: User = Depends(admin)):
     secret = pyotp.random_base32()
     user.totp_secret = encrypt_session(secret)
     db.commit()
-    account_label = f"X-Wallet · {user.username}"
+    account_label = f"X-Wallet + {user.username}"
     uri = pyotp.TOTP(secret).provisioning_uri(name=user.username, issuer_name='X-Wallet')
-    qr = qrcode.QRCode(box_size=6, border=3)
+    qr = qrcode.QRCode(box_size=3, border=1, error_correction=qrcode.constants.ERROR_CORRECT_L)
     qr.add_data(uri); qr.make(fit=True)
     image = qr.make_image(fill_color='black', back_color='white')
     buffer = BytesIO(); image.save(buffer, format='PNG')
@@ -270,9 +335,9 @@ def admin_setup_user_2fa(uid: int, db: Session = Depends(get_db), actor: User = 
     target.totp_enabled = False
     db.commit()
     issuer = 'X-Wallet'
-    account_name = f'{issuer} ({target.username})'
-    uri = pyotp.TOTP(secret).provisioning_uri(name=target.username, issuer_name=issuer)
-    qr = qrcode.QRCode(box_size=6, border=3)
+    account_name = f'X-Wallet + {target.username}'
+    uri = pyotp.TOTP(secret).provisioning_uri(name=target.username, issuer_name='X-Wallet')
+    qr = qrcode.QRCode(box_size=3, border=1, error_correction=qrcode.constants.ERROR_CORRECT_L)
     qr.add_data(uri); qr.make(fit=True)
     image = qr.make_image(fill_color='black', back_color='white')
     buffer = BytesIO(); image.save(buffer, format='PNG')
@@ -498,7 +563,7 @@ def assign(data:AssignIn, db:Session=Depends(get_db), actor:User=Depends(admin))
     # Reassignment revokes old active assignments but never deletes history/messages/tags.
     old=db.query(Assignment).filter_by(customer_id=c.id,active=True).all()
     for a in old: a.active=False; a.revoked_at=datetime.now(timezone.utc)
-    assignment=Assignment(customer_id=c.id,user_id=u.id,assigned_by=actor.id,active=True); db.add(assignment); db.commit(); audit(db,actor,'customer.assign','customer',c.id,f'to_user={u.id}'); return {'ok':True,'history_preserved':True,'customer_id':c.id,'user_id':u.id,'public_user_id':u.public_id,'username':u.username,'assignment_id':assignment.id}
+    assignment=Assignment(customer_id=c.id,user_id=u.id,assigned_by=actor.id,active=True); db.add(assignment); db.add(Notification(user_id=u.id,customer_id=c.id,title='New customer assigned',body=f'A new Telegram customer has been assigned to you: {c.alias or 'Telegram customer'}',kind='assignment')); db.commit(); audit(db,actor,'customer.assign','customer',c.id,f'to_user={u.id}'); return {'ok':True,'history_preserved':True,'customer_id':c.id,'user_id':u.id,'public_user_id':u.public_id,'username':u.username,'assignment_id':assignment.id}
 
 @app.post('/api/admin/assign/bulk')
 def bulk_assign(data:BulkAssignIn, db:Session=Depends(get_db), actor:User=Depends(admin)):
@@ -514,7 +579,7 @@ def bulk_assign(data:BulkAssignIn, db:Session=Depends(get_db), actor:User=Depend
         c=db.get(Customer,cid)
         if not c: continue
         for a in db.query(Assignment).filter_by(customer_id=cid,active=True).all(): a.active=False; a.revoked_at=datetime.now(timezone.utc)
-        db.add(Assignment(customer_id=cid,user_id=u.id,assigned_by=actor.id,active=True))
+        db.add(Assignment(customer_id=cid,user_id=u.id,assigned_by=actor.id,active=True)); db.add(Notification(user_id=u.id,customer_id=cid,title='New customer assigned',body=f'A new Telegram customer has been assigned to you: {c.alias or 'Telegram customer'}',kind='assignment'))
     db.commit(); audit(db,actor,'customer.bulk_assign','user',u.id,f'count={len(data.customer_ids)}'); return {'ok':True,'count':len(data.customer_ids)}
 
 @app.post('/api/admin/revoke/{customer_id}')
@@ -568,7 +633,7 @@ async def send(cid:int,data:SendIn, db:Session=Depends(get_db), user:User=Depend
     except Exception as e: raise HTTPException(400,str(e))
     m=db.query(Message).filter_by(customer_id=cid,telegram_message_id=str(sent.id)).first()
     if not m:
-        m=Message(customer_id=cid,telegram_message_id=str(sent.id),direction='out',body=data.text,sent_at=sent.date or datetime.now(timezone.utc),sender_label=user.username)
+        m=Message(customer_id=cid,telegram_message_id=str(sent.id),direction='out',body=data.text,sent_at=sent.date or datetime.now(timezone.utc),sender_label=user.username,sender_user_id=user.id)
         db.add(m); db.commit(); db.refresh(m)
     return {'ok':True,'message':{'id':m.id,'direction':'out','text':m.body,'sent_at':utc_iso(m.sent_at),'sender':m.sender_label}}
 
@@ -590,7 +655,7 @@ async def upload_customer_media(cid:int, file:UploadFile=File(...), caption:str=
         sent=await tg.send_media(c.account_id,c,full,caption.strip())
         rel=os.path.relpath(full,UPLOAD_ROOT)
         msg=Message(customer_id=cid,telegram_message_id=str(sent.id),direction='out',body=caption.strip(),
-                    media_path=rel,sent_at=sent.date or datetime.now(timezone.utc),sender_label=user.username)
+                    media_path=rel,sent_at=sent.date or datetime.now(timezone.utc),sender_label=user.username,sender_user_id=user.id)
         db.add(msg); db.commit(); db.refresh(msg)
         return {'ok':True,'message_id':msg.id}
     except Exception as exc:
@@ -613,7 +678,7 @@ async def forward_chat_message(mid:int, data:ForwardIn, db:Session=Depends(get_d
         sent=await tg.forward_message(source.account_id,source,target,source_msg.telegram_message_id)
         row=Message(customer_id=target.id,telegram_message_id=str(sent.id),direction='out',
                     body=source_msg.body,media_path=source_msg.media_path,
-                    sent_at=sent.date or datetime.now(timezone.utc),sender_label=user.username)
+                    sent_at=sent.date or datetime.now(timezone.utc),sender_label=user.username,sender_user_id=user.id)
         if not db.query(Message).filter_by(customer_id=target.id,telegram_message_id=str(sent.id)).first():
             db.add(row);db.commit()
         return {'ok':True,'target_customer_id':target.id}
@@ -626,7 +691,7 @@ def mark_read(cid:int, db:Session=Depends(get_db), user:User=Depends(current_use
     latest=db.query(Message).filter_by(customer_id=cid).order_by(desc(Message.id)).first()
     state=db.query(ReadState).filter_by(customer_id=cid,user_id=user.id).first()
     if not state: state=ReadState(customer_id=cid,user_id=user.id); db.add(state)
-    state.last_read_message_id=latest.id if latest else 0; db.commit(); return {'ok':True}
+    state.last_read_message_id=latest.id if latest else 0; db.query(Notification).filter_by(user_id=user.id,customer_id=cid,read_at=None).update({Notification.read_at: datetime.now(timezone.utc)}); db.commit(); return {'ok':True}
 
 @app.get('/api/customers/{cid}/tags')
 def get_tags(cid:int, db:Session=Depends(get_db), user:User=Depends(current_user)):
@@ -660,18 +725,55 @@ def delete_tag(tag_id:int, db:Session=Depends(get_db), user:User=Depends(current
     if not allowed: raise HTTPException(403,'Cannot delete another employee private tag')
     db.delete(tag); db.commit(); audit(db,user,'tag.delete','tag',tag_id); return {'ok':True}
 
+@app.get('/api/admin/employee-monitor')
+def employee_monitor(db: Session = Depends(get_db), actor: User = Depends(admin)):
+    now_utc = datetime.now(timezone.utc)
+    local_now = now_utc.astimezone(ZoneInfo('Asia/Yangon'))
+    local_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
+    employees = db.query(User).filter(User.role.in_(['employee','chatting','finding'])).order_by(User.created_at.desc()).all()
+    out = []
+    for u in employees:
+        sessions = db.query(PresenceSession).filter_by(user_id=u.id).order_by(desc(PresenceSession.last_seen)).all()
+        latest = sessions[0] if sessions else None
+        is_online = bool(latest and latest.is_active and (now_utc - (latest.last_seen if latest.last_seen.tzinfo else latest.last_seen.replace(tzinfo=timezone.utc))).total_seconds() <= 90)
+        active_count = db.query(Assignment).filter_by(user_id=u.id, active=True).count()
+        message_count = db.query(Message).filter(Message.sender_user_id==u.id, Message.direction=='out', Message.sent_at>=local_start).count()
+        total_messages = db.query(Message).filter(Message.sender_user_id==u.id, Message.direction=='out').count()
+        today_assignments = db.query(Assignment).filter(Assignment.user_id==u.id, Assignment.assigned_at>=local_start).count()
+        intervals = []
+        for sess in sessions:
+            start = sess.login_at if sess.login_at.tzinfo else sess.login_at.replace(tzinfo=timezone.utc)
+            last_seen = sess.last_seen if sess.last_seen.tzinfo else sess.last_seen.replace(tzinfo=timezone.utc)
+            end = now_utc if sess.is_active and (now_utc-last_seen).total_seconds() <= 90 else (sess.logout_at or sess.last_seen)
+            end = end if end.tzinfo else end.replace(tzinfo=timezone.utc)
+            if end >= local_start and start <= now_utc:
+                intervals.append((max(start, local_start), min(end, now_utc)))
+        intervals.sort(key=lambda item: item[0])
+        merged = []
+        for start, end in intervals:
+            if not merged or start > merged[-1][1]: merged.append([start, end])
+            elif end > merged[-1][1]: merged[-1][1] = end
+        online_seconds = sum(max(0, int((end-start).total_seconds())) for start, end in merged)
+        channel_row = db.query(AuditLog).filter(AuditLog.actor_user_id==u.id, AuditLog.action=='channel.open').order_by(desc(AuditLog.created_at)).first()
+        creator = db.query(AuditLog).filter(AuditLog.action=='user.create', AuditLog.target_type=='user', AuditLog.target_id==str(u.id)).order_by(AuditLog.created_at.asc()).first()
+        creator_user = db.get(User, creator.actor_user_id) if creator and creator.actor_user_id else None
+        login_row = next((x for x in sessions if x.login_at), None)
+        logout_row = next((x for x in sessions if x.logout_at), None)
+        offline_since = None
+        if not is_online and latest:
+            last = latest.last_seen if latest.last_seen.tzinfo else latest.last_seen.replace(tzinfo=timezone.utc)
+            offline_since = (latest.logout_at or (last + timedelta(seconds=90))).isoformat()
+        out.append({'id':u.id,'username':u.username,'role':u.role,'active':u.active,'online':is_online,'login_at':utc_iso(latest.login_at if latest else None),'logout_at':utc_iso(logout_row.logout_at if logout_row else None),'online_since':utc_iso(latest.login_at if is_online and latest else None),'offline_since':offline_since,'online_seconds_today':online_seconds,'active_customers':active_count,'today_assigned':today_assignments,'today_messages':message_count,'total_messages':total_messages,'created_at':utc_iso(u.created_at),'created_by':creator_user.username if creator_user else '--','last_channel':channel_row.target_id if channel_row else '--','last_channel_at':utc_iso(channel_row.created_at if channel_row else None)})
+    return {'employees':out,'online_count':sum(1 for x in out if x['online']),'active_conversations':sum(x['active_customers'] for x in out),'today_messages':sum(x['today_messages'] for x in out),'today_assignments':sum(x['today_assigned'] for x in out),'timezone':'Asia/Yangon'}
+
 @app.get('/api/admin/stats')
 def stats(db:Session=Depends(get_db), actor:User=Depends(admin)):
-    today=datetime.now(timezone.utc).date()
+    local_now=datetime.now(ZoneInfo('Asia/Yangon'))
+    local_start=local_now.replace(hour=0,minute=0,second=0,microsecond=0).astimezone(timezone.utc)
     users=db.query(User).all(); active_assignments=db.query(Assignment).filter_by(active=True).count()
-    online=0
-    now_utc=datetime.now(timezone.utc)
-    for u in users:
-        if not u.last_seen: continue
-        last_seen=u.last_seen if u.last_seen.tzinfo else u.last_seen.replace(tzinfo=timezone.utc)
-        if (now_utc-last_seen).total_seconds()<300: online+=1
+    online=db.query(PresenceSession.user_id).filter(PresenceSession.is_active==True, PresenceSession.last_seen>=datetime.now(timezone.utc)-timedelta(seconds=90)).distinct().count()
     employee_roles=('employee','chatting','finding')
-    return {'employees':len([u for u in users if u.role in employee_roles]),'online_last_5m':online,'active_conversations':active_assignments,'today_received':db.query(Assignment).filter(Assignment.assigned_at>=datetime.combine(today,datetime.min.time(),tzinfo=timezone.utc)).count(),'telegram_accounts':db.query(TgAccount).count()}
+    return {'employees':len([u for u in users if u.role in employee_roles]),'online_count':online,'online_last_5m':online,'active_conversations':active_assignments,'today_received':db.query(Assignment).filter(Assignment.assigned_at>=local_start).count(),'today_messages':db.query(Message).filter(Message.direction=='out',Message.sent_at>=local_start).count(),'telegram_accounts':db.query(TgAccount).count(),'timezone':'Asia/Yangon'}
 
 @app.get('/api/admin/audit')
 def audit_logs(limit:int=100,db:Session=Depends(get_db),actor:User=Depends(admin)):

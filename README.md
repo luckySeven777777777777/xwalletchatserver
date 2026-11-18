@@ -1,3 +1,14 @@
+## v7.6 additions
+
+- Per-browser presence sessions with heartbeat/logout records; online state expires after 90 seconds without heartbeat.
+- Employee monitor endpoint reports Yangon-day assignment counts, handled customer assignments, employee-attributed outgoing messages, social-channel access, login/logout and online duration. Historical outgoing messages before v7.6 are not retroactively attributable to an employee.
+- Assignment and inbound Telegram message notifications are persisted per employee and exposed through `/api/notifications`.
+- New employee UI controls: Light/Dark theme, Chinese/English labels, notification bell, unread count, and optional spoken alert (“You have a new user, please check.”).
+- Admin dashboard employee monitor and Telegram account selector.
+- Added `presence_sessions`, `notifications`, and `messages.sender_user_id`; existing databases are upgraded by startup migration / `create_all`.
+
+Presence is based on authenticated browser heartbeats. Closing a browser without pressing Log out is treated as offline after 90 seconds. Platform voice availability depends on the employee browser’s speech synthesis voices.
+
 # Telegram CRM Management (Railway starter)
 
 A deployable first-stage CRM scaffold for ordinary Telegram user accounts using MTProto, with separate admin/employee logins, assignment-based access, employee-private tags, team-shared tags, persistent message storage, and external social-site shortcuts.

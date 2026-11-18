@@ -68,6 +68,7 @@ class Message(Base):
     media_path: Mapped[str] = mapped_column(Text, default='')
     sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
     sender_label: Mapped[str] = mapped_column(String(120), default='Customer')
+    sender_user_id: Mapped[int | None] = mapped_column(ForeignKey('users.id'), nullable=True, index=True)
     __table_args__ = (UniqueConstraint('customer_id','telegram_message_id', name='uq_message_tg'),)
 
 class ReadState(Base):
@@ -98,3 +99,26 @@ class AuditLog(Base):
     target_id: Mapped[str] = mapped_column(String(100), default='')
     detail: Mapped[str] = mapped_column(Text, default='')
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class PresenceSession(Base):
+    __tablename__ = 'presence_sessions'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    session_key: Mapped[str] = mapped_column(String(100))
+    login_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    last_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    logout_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    __table_args__ = (UniqueConstraint('user_id', 'session_key', name='uq_presence_user_session'),)
+
+class Notification(Base):
+    __tablename__ = 'notifications'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    customer_id: Mapped[int | None] = mapped_column(ForeignKey('customers.id'), nullable=True, index=True)
+    title: Mapped[str] = mapped_column(String(160), default='New customer')
+    body: Mapped[str] = mapped_column(String(500), default='A customer has been assigned to you.')
+    kind: Mapped[str] = mapped_column(String(40), default='assignment')
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
+    read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
