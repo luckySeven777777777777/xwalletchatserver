@@ -71,6 +71,8 @@ class Message(Base):
     direction: Mapped[str] = mapped_column(String(10))
     body: Mapped[str] = mapped_column(Text, default='')
     media_path: Mapped[str] = mapped_column(Text, default='')
+    media_type: Mapped[str] = mapped_column(String(20), default='')
+    media_pending: Mapped[bool] = mapped_column(Boolean, default=False)
     transcript: Mapped[str] = mapped_column(Text, default='')
     sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
     sender_label: Mapped[str] = mapped_column(String(120), default='Customer')

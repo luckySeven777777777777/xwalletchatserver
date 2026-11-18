@@ -6,7 +6,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
-from sqlalchemy import desc, text, func
+from sqlalchemy import desc, text, func, inspect
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from .db import Base, engine, get_db, SessionLocal
 from .models import User, Team, TgAccount, Customer, Assignment, Message, Tag, AuditLog, ReadState, PresenceSession
@@ -19,9 +19,21 @@ from zoneinfo import ZoneInfo
 
 Base.metadata.create_all(bind=engine)
 
+# Add media recovery metadata to existing Railway PostgreSQL/SQLite databases.
+# create_all() does not alter an already-created messages table.
+def ensure_message_media_columns():
+    with engine.begin() as conn:
+        columns = {col['name'] for col in inspect(conn).get_columns('messages')}
+        if 'media_type' not in columns:
+            conn.execute(text("ALTER TABLE messages ADD COLUMN media_type VARCHAR(20) NOT NULL DEFAULT ''"))
+        if 'media_pending' not in columns:
+            conn.execute(text("ALTER TABLE messages ADD COLUMN media_pending BOOLEAN NOT NULL DEFAULT FALSE"))
+
+ensure_message_media_columns()
+
 # Fine-grained delegated-admin permissions. Superadmins always bypass this matrix.
 ADMIN_PERMISSION_KEYS = {
-    'users.create_employee', 'users.manage_status',
+    'users.create_employee', 'users.create_admin', 'users.manage_status',
     'users.delete', 'users.reset_password', 'users.manage_team', 'users.manage_2fa',
     'teams.manage', 'telegram.connect', 'telegram.sync', 'customers.assign',
     'stats.view',
@@ -170,6 +182,10 @@ def touch_presence(db: Session, user: User, session_key: str, *, login: bool = F
     return row
 
 def media_kind(path):
+    ext = os.path.splitext(path or '')[1].lower()
+    if ext in {'.jpg','.jpeg','.png','.gif','.webp','.bmp','.heic','.tif','.tiff'}: return 'image'
+    if ext in {'.mp4','.mov','.m4v','.webm','.mkv','.avi','.mpg','.mpeg'}: return 'video'
+    if ext in {'.mp3','.m4a','.ogg','.oga','.opus','.wav','.aac','.flac','.aiff','.3gp'}: return 'audio'
     mime = mimetypes.guess_type(path or '')[0] or ''
     if mime.startswith('image/'): return 'image'
     if mime.startswith('video/'): return 'video'
@@ -470,15 +486,16 @@ def admin_reset_user_2fa(uid: int, db: Session = Depends(get_db), actor: User = 
 
 @app.get('/api/admin/users')
 def list_users(db: Session = Depends(get_db), actor: User = Depends(admin)):
-    require_any_permission(actor, 'users.create_employee','users.manage_status','users.delete','users.reset_password','users.manage_team','users.manage_2fa','customers.assign')
-    return [{'id':u.id,'public_id':u.public_id,'username':(u.username[len(f'deleted_{u.id}_'):] if u.username.startswith(f'deleted_{u.id}_') else u.username),'deleted':u.username.startswith(f'deleted_{u.id}_'),'role':u.role,'team_id':u.team_id,'active':u.active,'totp_enabled':u.totp_enabled,'created_at':u.created_at.isoformat(),'last_seen':u.last_seen.isoformat() if u.last_seen else None,'created_by_user_id':u.created_by_user_id,'permissions':user_permissions(u)} for u in db.query(User).order_by(User.id).all()]
+    require_any_permission(actor, 'users.create_employee','users.create_admin','users.manage_status','users.delete','users.reset_password','users.manage_team','users.manage_2fa','customers.assign')
+    query = db.query(User)
+    if actor.role != 'superadmin':
+        query = query.filter(User.role != 'superadmin')
+    return [{'id':u.id,'public_id':u.public_id,'username':(u.username[len(f'deleted_{u.id}_'):] if u.username.startswith(f'deleted_{u.id}_') else u.username),'deleted':u.username.startswith(f'deleted_{u.id}_'),'role':u.role,'team_id':u.team_id,'active':u.active,'totp_enabled':u.totp_enabled,'created_at':u.created_at.isoformat(),'last_seen':u.last_seen.isoformat() if u.last_seen else None,'created_by_user_id':u.created_by_user_id,'permissions':user_permissions(u)} for u in query.order_by(User.id).all()]
 
 @app.post('/api/admin/users')
 def create_user(data: UserIn, request: Request, db: Session = Depends(get_db), actor: User = Depends(admin)):
     username = data.username.strip()
     if data.role == 'admin':
-        if actor.role != 'superadmin':
-            raise HTTPException(403, 'Only the super administrator can create administrator accounts')
         require_permission(actor, 'users.create_admin')
     else:
         require_permission(actor, 'users.create_employee')
@@ -487,8 +504,12 @@ def create_user(data: UserIn, request: Request, db: Session = Depends(get_db), a
     invalid_permissions=sorted(set(data.permissions)-ADMIN_PERMISSION_KEYS)
     if invalid_permissions:
         raise HTTPException(400, 'Unknown permissions: '+', '.join(invalid_permissions))
+    if actor.role != 'superadmin' and data.role == 'admin':
+        not_delegable = sorted(set(data.permissions) - set(user_permissions(actor)))
+        if not_delegable:
+            raise HTTPException(403, 'You cannot grant permissions you do not have: ' + ', '.join(not_delegable))
     if data.role not in ('admin', 'employee', 'chatting', 'finding'):
-        raise HTTPException(400, 'Role must be admin, Chatting, or Finding')
+        raise HTTPException(400, 'Role must be Administrator, Chatting, or Finding')
     if len(data.password) < 10:
         raise HTTPException(400, 'Password must be at least 10 characters')
     if len(data.password.encode('utf-8')) > 72:
@@ -803,19 +824,53 @@ def messages(cid:int, limit:int=200, before:int|None=None, db:Session=Depends(ge
         'text':redact(m.body) if user.role not in ('admin','superadmin') else m.body,
         'sent_at':utc_iso(m.sent_at),
         'sender':m.sender_label,
-        'media_available':bool(m.media_path and os.path.isfile(os.path.join(UPLOAD_ROOT,m.media_path))),
-        'media_kind':media_kind(m.media_path) if m.media_path else None,
-        'media_url':f'/api/messages/{m.id}/media' if m.media_path and os.path.isfile(os.path.join(UPLOAD_ROOT,m.media_path)) else None,
+        'media_available':bool((m.media_path and os.path.isfile(os.path.join(UPLOAD_ROOT,m.media_path))) or m.media_pending),
+        'media_kind':m.media_type or (media_kind(m.media_path) if m.media_path else None),
+        'media_url':f'/api/messages/{m.id}/media' if ((m.media_path and os.path.isfile(os.path.join(UPLOAD_ROOT,m.media_path))) or m.media_pending) else None,
         'transcript':m.transcript or ''
     } for m in rows]
 
 @app.get('/api/messages/{mid}/media')
-def message_media(mid:int, db:Session=Depends(get_db), user:User=Depends(current_user)):
+async def message_media(mid:int, db:Session=Depends(get_db), user:User=Depends(current_user)):
     msg=db.get(Message,mid)
-    if not msg or not can_access(db,user,msg.customer_id) or not msg.media_path:
+    if not msg or not can_access(db,user,msg.customer_id):
         raise HTTPException(404,'Media not found')
-    path=safe_upload_path(msg.media_path)
+    path = ''
+    if msg.media_path:
+        try:
+            path = safe_upload_path(msg.media_path)
+        except HTTPException:
+            path = ''
+    # Lazy recovery: if the file was missed during an earlier sync or the volume
+    # was full, fetch the original Telegram message when the user opens it.
+    if not path:
+        customer = db.get(Customer, msg.customer_id)
+        account_id = customer.account_id if customer else None
+        client = tg._clients.get(account_id) if account_id else None
+        if client and client.is_connected() and msg.telegram_message_id:
+            try:
+                peer = await client.get_input_entity(int(customer.telegram_peer_id))
+                original = await client.get_messages(peer, ids=int(msg.telegram_message_id))
+                if original and getattr(original, 'media', None):
+                    msg.media_type = tg.message_media_kind(original)
+                    msg.media_pending = True
+                    recovered = await tg.save_message_media(account_id, original, customer.id)
+                    if recovered and os.path.isfile(recovered) and os.path.getsize(recovered) > 0:
+                        msg.media_path = os.path.relpath(recovered, UPLOAD_ROOT)
+                        msg.media_pending = False
+                        db.commit()
+                        path = safe_upload_path(msg.media_path)
+            except Exception as exc:
+                db.rollback()
+                print('telegram lazy media recovery:', repr(exc))
+    if not path:
+        raise HTTPException(404,'Media is not available locally and could not be recovered from Telegram. Check the Telegram connection and Railway volume.')
     guessed = mimetypes.guess_type(path)[0] or 'application/octet-stream'
+    ext = os.path.splitext(path)[1].lower()
+    if ext in ('.ogg','.oga','.opus','.mp3','.m4a','.wav','.aac','.flac','.3gp') and not guessed.startswith('audio/'):
+        guessed = 'audio/ogg' if ext in ('.ogg','.oga','.opus') else 'audio/mpeg'
+    if ext in ('.mp4','.mov','.m4v','.webm','.mkv','.avi','.3gp') and not guessed.startswith('video/'):
+        guessed = 'video/mp4' if ext != '.webm' else 'video/webm'
     return FileResponse(path, media_type=guessed, headers={'Content-Disposition': 'inline; filename=\"' + os.path.basename(path).replace('\"','') + '\"'})
 
 @app.post('/api/messages/{mid}/transcribe')

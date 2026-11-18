@@ -19,6 +19,26 @@ def upload_root():
     os.makedirs(path, exist_ok=True)
     return path
 
+def message_media_kind(message):
+    if not getattr(message, 'media', None):
+        return ''
+    if getattr(message, 'photo', None):
+        return 'image'
+    if getattr(message, 'video', None) or getattr(message, 'video_note', None):
+        return 'video'
+    if getattr(message, 'voice', None) or getattr(message, 'audio', None):
+        return 'audio'
+    file_info = getattr(message, 'file', None)
+    mime = (getattr(file_info, 'mime_type', None) or '').lower()
+    if mime.startswith('image/'):
+        return 'image'
+    if mime.startswith('video/'):
+        return 'video'
+    if mime.startswith('audio/'):
+        return 'audio'
+    return 'file'
+
+
 def customer_label(entity):
     name = ' '.join(filter(None, [getattr(entity, 'first_name', ''), getattr(entity, 'last_name', '')])).strip()
     username = getattr(entity, 'username', '') or ''
@@ -56,8 +76,14 @@ async def save_message_media(account_id: int, message, customer_id: int):
                 ext = '.jpg'
             elif getattr(message, 'voice', None) or getattr(message, 'audio', None):
                 ext = '.ogg' if getattr(message, 'voice', None) else '.mp3'
-            elif getattr(message, 'video', None):
+            elif getattr(message, 'video', None) or getattr(message, 'video_note', None):
                 ext = '.mp4'
+            elif mime.lower().startswith('image/'):
+                ext = mimetypes.guess_extension(mime) or '.jpg'
+            elif mime.lower().startswith('video/'):
+                ext = mimetypes.guess_extension(mime) or '.mp4'
+            elif mime.lower().startswith('audio/'):
+                ext = mimetypes.guess_extension(mime) or '.ogg'
             else:
                 ext = '.bin'
         ext = re.sub(r'[^.A-Za-z0-9]', '', ext)[:12] or '.bin'
@@ -176,12 +202,15 @@ def attach_handlers(account_id: int, client: TelegramClient):
                     existing_path = os.path.join(upload_root(), existing.media_path) if existing.media_path else ''
                     if getattr(event.message, 'media', None) and (not existing_path or not os.path.isfile(existing_path)):
                         recovered = await save_message_media(account_id, event.message, customer.id)
+                        existing.media_type = message_media_kind(event.message)
+                        existing.media_pending = True
                         if recovered:
                             existing.media_path = os.path.relpath(recovered, upload_root())
-                            db.commit()
+                            existing.media_pending = False
+                        db.commit()
                 else:
                     media_path = await save_message_media(account_id, event.message, customer.id)
-                    db.add(Message(customer_id=customer.id, telegram_message_id=mid, direction='in', body=event.raw_text or '', media_path=os.path.relpath(media_path, upload_root()) if media_path else '', sent_at=event.date or datetime.now(timezone.utc), sender_label='Customer'))
+                    db.add(Message(customer_id=customer.id, telegram_message_id=mid, direction='in', body=event.raw_text or '', media_path=os.path.relpath(media_path, upload_root()) if media_path else '', media_type=message_media_kind(event.message), media_pending=bool(getattr(event.message, 'media', None) and not media_path), sent_at=event.date or datetime.now(timezone.utc), sender_label='Customer'))
                     await save_avatar(account_id, customer, sender)
                     db.commit()
             finally: db.close()
@@ -349,12 +378,16 @@ async def sync_dialog_messages(account_id: int, client: TelegramClient, dialog_r
                     if existing:
                         existing_path = os.path.join(upload_root(), existing.media_path) if existing.media_path else ''
                         if getattr(msg, 'media', None) and (not existing_path or not os.path.isfile(existing_path)):
+                            existing.media_type = message_media_kind(msg)
+                            existing.media_pending = True
                             media_path = await save_message_media(account_id, msg, customer_id)
                             if media_path:
                                 existing.media_path = os.path.relpath(media_path, upload_root())
+                                existing.media_pending = False
                                 db.commit()
                                 media_recovered += 1
                             else:
+                                db.commit()
                                 media_failed += 1
                         continue
                     media_path = await save_message_media(account_id, msg, customer_id)
@@ -364,6 +397,8 @@ async def sync_dialog_messages(account_id: int, client: TelegramClient, dialog_r
                         direction='out' if msg.out else 'in',
                         body=msg.message or '',
                         media_path=os.path.relpath(media_path, upload_root()) if media_path else '',
+                        media_type=message_media_kind(msg),
+                        media_pending=bool(getattr(msg, 'media', None) and not media_path),
                         sent_at=msg.date or datetime.now(timezone.utc),
                         sender_label='Agent' if msg.out else 'Customer'
                     ))
