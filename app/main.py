@@ -36,6 +36,23 @@ with engine.begin() as conn:
     if "avatar_path" not in customer_columns:
         conn.exec_driver_sql("ALTER TABLE customers ADD COLUMN avatar_path VARCHAR(500) NOT NULL DEFAULT ''")
 
+    # v7.6 production hotfix: create_all() creates missing tables but does not
+    # add newly introduced columns to an existing PostgreSQL table. Older
+    # presence_sessions tables therefore need an explicit additive migration.
+    presence_columns = (
+        {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(presence_sessions)").fetchall()}
+        if engine.dialect.name == "sqlite"
+        else {row[0] for row in conn.exec_driver_sql(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema = current_schema() AND table_name = 'presence_sessions'"
+        ).fetchall()}
+    )
+    if "channel" not in presence_columns:
+        conn.exec_driver_sql(
+            "ALTER TABLE presence_sessions "
+            "ADD COLUMN channel VARCHAR(40) NOT NULL DEFAULT 'Telegram'"
+        )
+
 def make_public_user_id(db):
     for _ in range(200):
         candidate = str(secrets.randbelow(900000) + 100000)

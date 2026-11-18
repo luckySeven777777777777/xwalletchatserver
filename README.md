@@ -200,3 +200,11 @@ In the X-Wallet service Variables, set `DATABASE_URL` to the Railway PostgreSQL 
 - Browser voice notifications use the browser's speech synthesis voices. A female-sounding English voice is selected when the browser provides one; the exact voice depends on the operating system/browser voice pack.
 - Social channel views remain inside the CRM iframe. Platforms that block iframe embedding cannot be forced to render inside the CRM by client-side code.
 - 2FA setup continues to require a valid current authenticator code. The QR rendering was reduced for faster display, but secure enrollment cannot be completed before the employee scans the QR and verifies a code.
+
+
+## v7.6.1 PostgreSQL presence schema hotfix
+
+- Adds an idempotent startup migration for `presence_sessions.channel`.
+- Existing PostgreSQL deployments created before the channel field was introduced are upgraded in place with `VARCHAR(40) NOT NULL DEFAULT 'Telegram'`.
+- Existing presence rows, user accounts, Telegram sessions, assignments and messages are preserved; this migration does not drop or recreate tables.
+- The migration runs after SQLAlchemy creates any missing tables and before the API starts serving requests.
