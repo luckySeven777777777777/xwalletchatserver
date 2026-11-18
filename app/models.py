@@ -71,6 +71,7 @@ class Message(Base):
     direction: Mapped[str] = mapped_column(String(10))
     body: Mapped[str] = mapped_column(Text, default='')
     media_path: Mapped[str] = mapped_column(Text, default='')
+    transcript: Mapped[str] = mapped_column(Text, default='')
     sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
     sender_label: Mapped[str] = mapped_column(String(120), default='Customer')
     __table_args__ = (UniqueConstraint('customer_id','telegram_message_id', name='uq_message_tg'),)

@@ -11,6 +11,8 @@ class Settings:
     session_encryption_key: str = os.getenv("SESSION_ENCRYPTION_KEY", "")
     telegram_api_id: str = os.getenv("TELEGRAM_API_ID", "")
     telegram_api_hash: str = os.getenv("TELEGRAM_API_HASH", "")
+    openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
+    transcription_model: str = os.getenv("OPENAI_TRANSCRIPTION_MODEL", "gpt-4o-mini-transcribe")
     admin_username: str = os.getenv("ADMIN_USERNAME", "admin")
     admin_password: str = os.getenv("ADMIN_PASSWORD", "")
     app_base_url: str = os.getenv("APP_BASE_URL", os.getenv("PUBLIC_APP_URL", "https://xwalletchatserver-production.up.railway.app"))

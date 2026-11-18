@@ -135,10 +135,24 @@ body::before,body::after{display:none!important}
 }
 .top-actions .icon-action svg,.top-actions .icon-action i{display:block!important;margin:auto!important}
 .permission-hidden{display:none!important}.permission-box.hidden{display:none!important}.permission-box{border:1px solid var(--line,#38506f);border-radius:10px;padding:12px;margin:8px 0;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.permission-box label{display:flex;align-items:center;gap:7px;font-size:13px}.permission-box input{width:auto}.user-actions button{margin:4px}.user-actions .danger{background:#a93643;color:#fff}@media(max-width:700px){.permission-box{grid-template-columns:1fr}}
+
+/* v7.6.7 chat composer/media layout */
+.chatlayout{height:calc(100dvh - 245px);min-height:500px;align-items:stretch}
+.chatlayout>.messages{display:flex;flex-direction:column;min-height:0;overflow:hidden;gap:0}
+#chathead{flex:0 0 auto;padding:2px 0 10px;font-weight:600}
+#messages{flex:1 1 auto!important;height:auto!important;min-height:0;overflow:auto!important;overscroll-behavior:contain;padding:2px 4px 10px}
+#compose{flex:0 0 auto;margin:8px 0 6px;min-height:58px;max-height:120px;resize:vertical}
+.chat-tools{flex:0 0 auto;margin:0!important;padding:0 0 2px!important;min-height:36px}
+.emoji-panel{flex:0 0 auto;margin:6px 0 0}
+.media-preview{max-width:min(420px,100%);max-height:360px;object-fit:contain;background:#080b12}
+.bubble audio{width:min(420px,100%)}
+.voice-transcript{margin-top:8px;padding:8px 10px;border-left:3px solid #4c8df6;background:rgba(90,130,190,.12);border-radius:6px;white-space:pre-wrap;line-height:1.5}
+.transcribe-button{margin-top:7px!important;min-height:30px!important;padding:5px 10px!important;font-size:12px!important}
+@media(max-width:850px){.chatlayout{height:auto;min-height:0}.chatlayout>.messages{height:65vh;min-height:440px}.chatlayout #messages{min-height:180px}}
 </style></head><body><div id="login" class="card" style="max-width:420px;margin:8vh auto"><h1 id="loginbrand">X-WALLET CHATTING</h1><p class="muted">公司客服系统 · 独立员工登录</p><label>用户名</label><input id="username" autocomplete="username"><label>密码</label><input id="password" type="password" autocomplete="current-password"><button id="login-button" onclick="login()">登录</button><div id="twofa-step"><label>Google Authenticator 验证码</label><input id="login-2fa-code" inputmode="numeric" autocomplete="one-time-code" placeholder="输入 6 位验证码"><button onclick="verifyLogin2FA()">验证并登录</button></div><p id="loginerr" class="muted"></p></div>
 <div id="app" class="layout hidden"><aside class="side"><h2 id="brandname">X-WALLET SERVER</h2><button id="inboxnav" onclick="show('inbox')">💬 聊天工作台</button><button id="adminnav" onclick="show('admin')">⚙ 管理后台</button><button id="channelsnav" onclick="show('channels')">🔗 社交平台快捷入口</button><button id="logoutnav" onclick="logout()">退出登录</button><p id="who" class="muted"></p></aside><main class="main"><div class="main-top"><div class="top-actions"><button id="theme-toggle" class="tool-button secondary" onclick="toggleTheme()" title="Light / Dark">☀︎ Light / ☾ Dark</button><button id="language-toggle" class="tool-button secondary" onclick="toggleLanguage()">中文 / English</button><button id="notify-toggle" class="icon-action hidden" onclick="toggleNotifications()" title="Notifications"><svg viewBox="0 0 24 24"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"/></svg><span id="notify-count" class="notification-count hidden">0</span></button><button id="sound-toggle" class="icon-action hidden" onclick="toggleSound()" title="Sound on/off" aria-label="Sound on/off"><svg viewBox="0 0 24 24"><path d="M11 5 6 9H3v6h3l5 4zM15 9a5 5 0 0 1 0 6M17.5 6.5a9 9 0 0 1 0 11"/></svg></button><button id="securitybtn" class="secondary" onclick="open2FASettings()">🔐 2FA 安全设置</button><div id="userpill" class="user-pill"></div><div id="notification-pop" class="notification-pop hidden"><div class="row"><b>Notifications</b><button class="secondary" onclick="clearNotifications()">Clear</button></div><div id="notification-list" class="muted">No new customers.</div></div></div></div><section id="inbox"><h1>聊天工作台</h1><div class="row"><input id="search" placeholder="搜索客户编号 / 昵称" oninput="renderInbox()"><select id="filter" onchange="renderInbox()"><option value="all">全部</option><option value="unread">未读</option><option value="unreplied">未回</option></select></div><div class="chatlayout"><div class="list" id="inboxlist"></div><div class="messages"><div id="chathead">选择一个客户</div><div id="messages" style="height:48vh;overflow:auto"></div><textarea id="compose" placeholder="输入消息..." rows="3"></textarea>
 <div class="chat-tools">
- <input id="attach-file" type="file" accept="image/*,video/*" class="hidden" onchange="sendAttachment()">
+ <input id="attach-file" type="file" accept="image/*,video/*,audio/*,.ogg,.opus,.oga,.m4a,.mp3,.wav" class="hidden" onchange="sendAttachment()">
  <button type="button" class="secondary" onclick="$('attach-file').click()" title="Attach photo or video">📎</button>
  <button type="button" class="secondary" onclick="toggleEmoji()">😊 Emoji</button>
  <button type="button" onclick="send()">Sent</button>
@@ -182,11 +196,15 @@ body::before,body::after{display:none!important}
 const currentPath=location.pathname;
 let decodedPath=currentPath;
 try{decodedPath=decodeURIComponent(currentPath)}catch{}
+const adminRoute=decodedPath.match(/^\/admin-login\/([^/]+)\/?$/);
 const findingRoute=decodedPath.match(/^\/finding\/([^/]+)\/?$/);
 const chattingRoute=decodedPath.match(/^\/login\/([^/]+)\/?$/);
-const employeeRoute=findingRoute||chattingRoute;
+const employeeRoute=adminRoute||findingRoute||chattingRoute;
 const expectedUsername=employeeRoute?employeeRoute[1]:'';
-const expectedRole=findingRoute?'finding':(chattingRoute?'chatting':'');
+// "legacy" keeps older /login/<username> links working for both Chatting
+// employees and Administrators created by earlier versions.
+const expectedRole=adminRoute?'admin':(findingRoute?'finding':(chattingRoute?'legacy':''));
+
 const superadminRoute=decodedPath==='/superadmin-login';
 // A distinct sessionStorage key per employee link, plus a dedicated admin key.
 // sessionStorage survives refresh but is not shared between browser tabs.
@@ -195,7 +213,7 @@ let token=sessionStorage.getItem(sessionKey), me=null, activeCustomer=null, cust
 let presenceKey=sessionStorage.getItem(sessionKey+':presence')||('p_'+(crypto.randomUUID?crypto.randomUUID():Math.random().toString(36).slice(2)));sessionStorage.setItem(sessionKey+':presence',presenceKey);
 let seenCustomerIds=new Set(), inboxInitialized=false, notifications=[], soundEnabled=localStorage.getItem('xwallet_sound')!=='off', uiLanguage=localStorage.getItem('xwallet_language')||'zh', heartbeatTimer=null, staffCache=[];
 const $=id=>document.getElementById(id);
-if(expectedUsername){const routeBrand=expectedRole==='finding'?'X-WALLET FINDING':'X-WALLET CHATTING';$('username').value=expectedUsername;$('username').readOnly=true;$('loginbrand').textContent=routeBrand;document.title=routeBrand;}
+if(expectedUsername){const routeBrand=expectedRole==='admin'?'X-WALLET ADMIN':(expectedRole==='finding'?'X-WALLET FINDING':(expectedRole==='legacy'?'X-WALLET CHAT SERVER':'X-WALLET CHATTING'));$('username').value=expectedUsername;$('username').readOnly=true;$('loginbrand').textContent=routeBrand;document.title=routeBrand;}
 else{$('loginbrand').textContent='X-WALLET CHAT SERVER';document.title='X-WALLET CHAT SERVER';}
 if(superadminRoute){$('loginbrand').textContent='X-WALLET CHAT SERVER';document.querySelector('#login .muted').textContent='Super Administrator · Secure Server Login';}
 
@@ -222,7 +240,9 @@ async function verifyLogin2FA(){try{
 async function init(){try{
  me=await api('/me');
  if(expectedUsername && me.username.toLowerCase()!==expectedUsername.toLowerCase()) throw Error('此登录链接仅属于员工 '+expectedUsername+'，当前会话不匹配，请重新登录。');
- if(expectedRole && me.role!==expectedRole) throw Error('此登录链接仅适用于 '+(expectedRole==='finding'?'Finding':'Chatting')+' 员工账号。');
+ if(expectedRole==='admin' && me.role!=='admin') throw Error('此登录链接仅适用于 Administrator 管理员账号。');
+  if(expectedRole==='finding' && me.role!=='finding') throw Error('此登录链接仅适用于 Finding 员工账号。');
+  if(expectedRole==='legacy' && !['admin','chatting','employee'].includes(me.role)) throw Error('此旧版登录链接仅适用于管理员或 Chatting 员工账号。');
  if(superadminRoute && me.role!=='superadmin') throw Error('此入口仅允许超级管理员登录。请使用超级管理员账号。');
  $('login').classList.add('hidden');$('app').classList.remove('hidden');
  const isAdmin=['superadmin','admin'].includes(me.role), isFinding=me.role==='finding'; const adminRoleOption=$('newrole')?.querySelector('option[value=admin]'); if(adminRoleOption)adminRoleOption.hidden=me.role!=='superadmin'; updateNewRolePermissions();
@@ -232,7 +252,7 @@ async function init(){try{
  $('channelsnav').classList.toggle('hidden',!(isAdmin||isFinding));
  $('who').classList.toggle('hidden',!isAdmin);
  $('securitybtn').classList.toggle('hidden',!isAdmin); if(isAdmin){const teamCard=$('teamname')?.closest('.card');if(teamCard&&!hasPermission('teams.manage'))teamCard.classList.add('permission-hidden');const teamSelect=$('newteam');if(teamSelect&&!['teams.manage','users.manage_team'].some(hasPermission))teamSelect.classList.add('permission-hidden');const tgCard=$('phone')?.closest('.card');if(tgCard&&!hasPermission('telegram.connect'))tgCard.classList.add('permission-hidden');const staffCard=$('staff-monitor-rows')?.closest('.card');if(staffCard&&!hasPermission('stats.view'))staffCard.classList.add('permission-hidden');const userCard=$('users')?.closest('.card');if(userCard&&!['users.create_employee','users.manage_status','users.delete','users.reset_password','users.manage_team','users.manage_2fa'].some(hasPermission))userCard.classList.add('permission-hidden');const accountCard=$('accounts')?.closest('.card');if(accountCard&&!['telegram.connect','telegram.sync','customers.assign'].some(hasPermission))accountCard.classList.add('permission-hidden');const customerCard=$('customers')?.closest('.card');if(customerCard&&!['customers.assign','telegram.sync'].some(hasPermission))customerCard.classList.add('permission-hidden');const createCard=$('newuser')?.closest('.card');if(createCard&&!hasPermission('users.create_employee'))createCard.classList.add('permission-hidden');}$('notify-toggle').classList.toggle('hidden',isAdmin);$('sound-toggle').classList.toggle('hidden',isAdmin);$('sound-toggle').title=soundEnabled?'Sound on':'Sound off';$('sound-toggle').setAttribute('aria-label',$('sound-toggle').title);$('sound-toggle').style.opacity=soundEnabled?'1':'.5';
- const appBrand=me.role==='superadmin'?'X-WALLET CHAT SERVER':(me.role==='admin'?'X-WALLET CHAT MANAGEMENT':(me.role==='finding'?'X-WALLET FINDING':'X-WALLET CHATTING'));
+ const appBrand=me.role==='superadmin'?'X-WALLET CHAT SERVER':(me.role==='admin'?'X-WALLET ADMIN':(me.role==='finding'?'X-WALLET FINDING':'X-WALLET CHATTING'));
  $('brandname').textContent=appBrand;
  $('loginbrand').textContent=appBrand;
  document.title=appBrand;
@@ -252,13 +272,20 @@ async function renderMessageList(ms){
   if(!response.ok)continue;
   const blob=await response.blob(), url=URL.createObjectURL(blob);mediaObjectUrls.push(url);
   const target=$('media-'+msg.id);if(!target)continue;
-  if(msg.media_kind==='image')target.innerHTML=`<img class="media-preview" src="${url}" alt="Photo attachment">`;
-  else if(msg.media_kind==='video')target.innerHTML=`<video class="media-preview" src="${url}" controls playsinline></video>`;
-  else if(msg.media_kind==='audio')target.innerHTML=`<audio src="${url}" controls></audio>`;
-  else target.innerHTML=`<a href="${url}" target="_blank" rel="noopener">Open attachment</a>`;
+  if(msg.media_kind==='image')target.innerHTML=`<img class="media-preview" src="${url}" alt="Telegram photo" loading="lazy">`;
+  else if(msg.media_kind==='video')target.innerHTML=`<video class="media-preview" src="${url}" controls playsinline preload="metadata"></video>`;
+  else if(msg.media_kind==='audio'){
+   target.innerHTML=`<audio src="${url}" controls preload="metadata"></audio>${msg.transcript?`<div class="voice-transcript"><b>Voice transcript</b><br>${esc(msg.transcript)}</div>`:`<button class="secondary transcribe-button" onclick="transcribeVoice(${msg.id},this)">Transcribe voice</button>`}`;
+  } else target.innerHTML=`<a href="${url}" target="_blank" rel="noopener">Open attachment</a>`;
  }catch(e){console.warn('media preview failed',e)}}
  $('messages').scrollTop=$('messages').scrollHeight;
 }
+async function transcribeVoice(messageId,button){
+ const old=button.textContent;button.disabled=true;button.textContent='Transcribing…';
+ try{const result=await api('/messages/'+messageId+'/transcribe',{method:'POST'});const target=$('media-'+messageId);if(target){const panel=document.createElement('div');panel.className='voice-transcript';const title=document.createElement('b');title.textContent='Voice transcript';const body=document.createElement('div');body.textContent=result.transcript||'';panel.append(title,body);button.replaceWith(panel)}}
+ catch(e){button.disabled=false;button.textContent=old;showModal('Voice transcription unavailable',e.message,true)}
+}
+
 async function openCustomer(id){activeCustomer=id;let c=customers.find(x=>x.id===id);$('chathead').textContent=c?.alias||('Customer '+id);let ms=await api('/customers/'+id+'/messages');await renderMessageList(ms);await api('/customers/'+id+'/read',{method:'POST'});await loadTags()}
 async function send(){if(!activeCustomer)return;let text=$('compose').value.trim();if(!text)return;try{await api('/customers/'+activeCustomer+'/send',{method:'POST',body:JSON.stringify({text})});$('compose').value='';await openCustomer(activeCustomer);await renderInbox()}catch(e){showModal('Send failed',e.message,true)}}
 async function sendAttachment(){
@@ -415,7 +442,7 @@ async function changeUserTeam(id,current){
   $('modal-confirm').textContent='保存';$('modal-confirm').onclick=async()=>{const v=$('modal-team-select').value;try{await api('/admin/users/'+id+'/team',{method:'PATCH',body:JSON.stringify({team_id:v?Number(v):null})});await loadAdmin();showModal('团队已更新','员工团队归属已更新。')}catch(e){showModal('操作失败',e.message,true)}};
  }catch(e){showModal('读取团队失败',e.message,true)}
 }
-async function showLoginLink(username,role='chatting'){const path=(role==='finding'?'/finding/':'/login/')+encodeURIComponent(username);let base='';try{base=(await api('/admin/app-url')).base_url||''}catch{}const url=base+path;showModal('Employee Login Link',`Account: ${username}`,false,`<div class="modal-linkrow"><input id="created-login-url" readonly value="${esc(url)}"><button onclick="copyCreatedLink()">Copy link</button></div><div class="modal-note">${base?'This link uses your configured branded domain.':'Set APP_BASE_URL to your own domain in hosting variables to create a full link without showing the hosting provider domain.'}</div>`)}
+async function showLoginLink(username,role='chatting'){const path=(role==='admin'?'/admin-login/':(role==='finding'?'/finding/':'/login/'))+encodeURIComponent(username);let base='';try{base=(await api('/admin/app-url')).base_url||''}catch{}const url=base+path;showModal('Employee Login Link',`Account: ${username}`,false,`<div class="modal-linkrow"><input id="created-login-url" readonly value="${esc(url)}"><button onclick="copyCreatedLink()">Copy link</button></div><div class="modal-note">${base?'This link uses your configured branded domain.':'Set APP_BASE_URL to your own domain in hosting variables to create a full link without showing the hosting provider domain.'}</div>`)}
 function selectedCustomerIds(){return Array.from(document.querySelectorAll('.customer-check:checked')).map(el=>Number(el.value)).filter(Number.isFinite)}
 function updateSelectedCount(){const n=selectedCustomerIds().length;const count=$('selected-customer-count');if(count)count.textContent=n+' selected';const all=Array.from(document.querySelectorAll('.customer-check'));if($('select-all-customers'))$('select-all-customers').checked=all.length>0&&n===all.length;}
 function toggleAllCustomers(checked){document.querySelectorAll('.customer-check').forEach(el=>el.checked=checked);updateSelectedCount()}

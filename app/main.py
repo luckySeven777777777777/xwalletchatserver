@@ -94,6 +94,17 @@ with engine.begin() as conn:
             "ADD COLUMN channel VARCHAR(40) NOT NULL DEFAULT 'Telegram'"
         )
 
+    message_columns = (
+        {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(messages)").fetchall()}
+        if engine.dialect.name == 'sqlite'
+        else {row[0] for row in conn.exec_driver_sql(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema = current_schema() AND table_name = 'messages'"
+        ).fetchall()}
+    )
+    if 'transcript' not in message_columns:
+        conn.exec_driver_sql("ALTER TABLE messages ADD COLUMN transcript TEXT NOT NULL DEFAULT ''")
+
 def make_public_user_id(db):
     for _ in range(200):
         candidate = str(secrets.randbelow(900000) + 100000)
@@ -106,7 +117,7 @@ with SessionLocal() as _migration_db:
         _user.public_id = make_public_user_id(_migration_db)
     _migration_db.commit()
 
-app = FastAPI(title='X-Wallet Chat Management', version='7.6.4')
+app = FastAPI(title='X-Wallet Chat Management', version='7.6.6')
 # Memory cache prevents connected-account avatar refresh from failing on a full Railway volume.
 _TELEGRAM_ACCOUNT_AVATAR_CACHE: dict[int, bytes] = {}
 app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins.split(','), allow_credentials=False, allow_methods=['*'], allow_headers=['*'])
@@ -193,6 +204,12 @@ def superadmin_login_page(): return FileResponse('static/index.html')
 @app.get('/login/{username}')
 def employee_login_link(username: str):
     # Chatting employee link; username is prefilled but never grants access by itself.
+    return FileResponse('static/index.html')
+
+@app.get('/admin-login/{username}')
+def administrator_login_link(username: str):
+    # Dedicated Administrator login link. Credentials are still required;
+    # the path only selects the correct role-specific login experience.
     return FileResponse('static/index.html')
 
 @app.get('/finding/{username}')
@@ -499,7 +516,8 @@ def create_user(data: UserIn, request: Request, db: Session = Depends(get_db), a
     audit(db, actor, 'user.create', 'user', u.id)
     from urllib.parse import quote
     base_url = (settings.app_base_url or 'https://xwalletchatserver-production.up.railway.app').rstrip('/')
-    login_path = ('/finding/' if u.role == 'finding' else '/login/') + quote(u.username, safe='')
+    login_prefix = '/admin-login/' if u.role == 'admin' else ('/finding/' if u.role == 'finding' else '/login/')
+    login_path = login_prefix + quote(u.username, safe='')
     login_url = base_url + login_path
     return {'id': u.id, 'public_id': u.public_id, 'username': u.username,
             'role': u.role, 'permissions': user_permissions(u), 'login_url': login_url, 'needs_custom_domain': False}
@@ -779,7 +797,7 @@ def messages(cid:int, limit:int=200, before:int|None=None, db:Session=Depends(ge
     if before: q=q.filter(Message.id<before)
     rows=q.order_by(desc(Message.id)).limit(min(max(limit,1),500)).all()[::-1]
     # Never serialize Telegram IDs, peer IDs, usernames, phone numbers or access hashes to employees.
-    return [{'id':m.id,'direction':m.direction,'text':redact(m.body) if user.role not in ('admin','superadmin') else m.body,'sent_at':utc_iso(m.sent_at),'sender':m.sender_label,'media_available':bool(m.media_path),'media_kind':media_kind(m.media_path) if m.media_path else None} for m in rows]
+    return [{'id':m.id,'direction':m.direction,'text':redact(m.body) if user.role not in ('admin','superadmin') else m.body,'sent_at':utc_iso(m.sent_at),'sender':m.sender_label,'media_available':bool(m.media_path and os.path.isfile(os.path.join(UPLOAD_ROOT,m.media_path))),'media_kind':media_kind(m.media_path) if m.media_path else None,'transcript':m.transcript or ''} for m in rows]
 
 @app.get('/api/messages/{mid}/media')
 def message_media(mid:int, db:Session=Depends(get_db), user:User=Depends(current_user)):
@@ -787,7 +805,50 @@ def message_media(mid:int, db:Session=Depends(get_db), user:User=Depends(current
     if not msg or not can_access(db,user,msg.customer_id) or not msg.media_path:
         raise HTTPException(404,'Media not found')
     path=safe_upload_path(msg.media_path)
-    return FileResponse(path, media_type=mimetypes.guess_type(path)[0] or 'application/octet-stream')
+    guessed = mimetypes.guess_type(path)[0] or 'application/octet-stream'
+    return FileResponse(path, media_type=guessed, headers={'Content-Disposition': 'inline; filename=\"' + os.path.basename(path).replace('\"','') + '\"'})
+
+@app.post('/api/messages/{mid}/transcribe')
+async def transcribe_message(mid:int, db:Session=Depends(get_db), user:User=Depends(current_user)):
+    msg=db.get(Message,mid)
+    if not msg or not can_access(db,user,msg.customer_id) or not msg.media_path:
+        raise HTTPException(404,'Voice message not found')
+    if msg.transcript:
+        return {'ok':True,'transcript':msg.transcript,'cached':True}
+    path=safe_upload_path(msg.media_path)
+    kind=media_kind(msg.media_path)
+    if kind != 'audio':
+        raise HTTPException(415,'Only voice/audio messages can be transcribed.')
+    if not settings.openai_api_key:
+        raise HTTPException(503,'Voice transcription is not configured. Add OPENAI_API_KEY to Railway Variables, then redeploy.')
+    size=os.path.getsize(path)
+    if size > 25*1024*1024:
+        raise HTTPException(413,'This audio file is larger than the 25 MB transcription limit.')
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=180) as client:
+            with open(path,'rb') as audio_file:
+                response=await client.post(
+                    'https://api.openai.com/v1/audio/transcriptions',
+                    headers={'Authorization':f'Bearer {settings.openai_api_key}'},
+                    data={'model':settings.transcription_model,'response_format':'json'},
+                    files={'file':(os.path.basename(path),audio_file,mimetypes.guess_type(path)[0] or 'audio/ogg')}
+                )
+        if response.status_code >= 400:
+            detail='Voice transcription provider rejected the request.'
+            try: detail=response.json().get('error',{}).get('message') or detail
+            except Exception: pass
+            raise HTTPException(response.status_code if response.status_code < 500 else 502,detail)
+        transcript=(response.json().get('text') or '').strip()
+        if not transcript:
+            raise HTTPException(422,'No speech was detected in this audio.')
+        msg.transcript=transcript
+        db.commit()
+        return {'ok':True,'transcript':transcript,'cached':False}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(502,'Voice transcription failed: '+str(exc)[:240])
 
 @app.post('/api/customers/{cid}/send')
 async def send(cid:int,data:SendIn, db:Session=Depends(get_db), user:User=Depends(current_user)):

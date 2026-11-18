@@ -38,17 +38,42 @@ async def save_avatar(account_id: int, customer: Customer, entity):
         print('telegram avatar sync:', repr(exc))
 
 async def save_message_media(account_id: int, message, customer_id: int):
+    """Persist Telegram photos, videos, documents and voice notes on the Railway volume."""
     try:
         if not getattr(message, 'media', None):
             return ''
-        size = getattr(getattr(message, 'file', None), 'size', None)
-        if size and size > 50 * 1024 * 1024:
+        tg_file = getattr(message, 'file', None)
+        size = getattr(tg_file, 'size', None)
+        if size and size > 200 * 1024 * 1024:
+            print(f'telegram media skipped (over 200 MB): message={getattr(message, "id", "?")} size={size}')
             return ''
-        ext = getattr(getattr(message, 'file', None), 'ext', None) or ''
-        ext = re.sub(r'[^.A-Za-z0-9]', '', ext)[:12]
-        path = os.path.join(upload_root(), f"tg_{account_id}_{customer_id}_{message.id}{ext}")
+        mime = getattr(tg_file, 'mime_type', None) or ''
+        ext = getattr(tg_file, 'ext', None) or ''
+        if not ext and mime:
+            ext = mimetypes.guess_extension(mime) or ''
+        if not ext:
+            if getattr(message, 'photo', None):
+                ext = '.jpg'
+            elif getattr(message, 'voice', None) or getattr(message, 'audio', None):
+                ext = '.ogg' if getattr(message, 'voice', None) else '.mp3'
+            elif getattr(message, 'video', None):
+                ext = '.mp4'
+            else:
+                ext = '.bin'
+        ext = re.sub(r'[^.A-Za-z0-9]', '', ext)[:12] or '.bin'
+        root = upload_root()
+        path = os.path.join(root, f"tg_{account_id}_{customer_id}_{message.id}{ext}")
+        if os.path.isfile(path) and os.path.getsize(path) > 0:
+            return path
         saved = await message.download_media(file=path)
-        return saved or ''
+        if saved and os.path.isfile(saved) and os.path.getsize(saved) > 0:
+            return saved
+        if os.path.isfile(path) and os.path.getsize(path) > 0:
+            return path
+        return ''
+    except OSError as exc:
+        print('telegram media storage error (check Railway Volume free space):', repr(exc))
+        return ''
     except Exception as exc:
         print('telegram media download:', repr(exc))
         return ''
@@ -303,10 +328,18 @@ async def sync_dialog_messages(account_id: int, client: TelegramClient, dialog_r
                 async for msg in client.iter_messages(entity, limit=None, reverse=True):
                     if not msg or not msg.id:
                         continue
-                    if db.query(Message).filter_by(
+                    existing = db.query(Message).filter_by(
                         customer_id=customer_id,
                         telegram_message_id=str(msg.id)
-                    ).first():
+                    ).first()
+                    # Older sync runs may have stored the text but failed to save
+                    # the attachment (for example when the Railway volume was full).
+                    if existing:
+                        if not existing.media_path and getattr(msg, 'media', None):
+                            media_path = await save_message_media(account_id, msg, customer_id)
+                            if media_path:
+                                existing.media_path = os.path.relpath(media_path, upload_root())
+                                db.commit()
                         continue
                     media_path = await save_message_media(account_id, msg, customer_id)
                     db.add(Message(
