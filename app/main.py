@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import desc, text, func, inspect
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from .db import Base, engine, get_db, SessionLocal
-from .models import User, Team, TgAccount, Customer, Assignment, Message, Tag, AuditLog, ReadState, PresenceSession, EmployeeAlertConfig, EmployeeAlertState
+from .models import User, Team, TgAccount, Customer, Assignment, Message, Tag, AuditLog, ReadState, PresenceSession, EmployeeAlertConfig, EmployeeAlertState, InboxNotification, AttendanceBotConfig, EmployeeTelegramIdentity, EmployeeBreakState
 from .security import hash_password, verify_password, create_token, decode_token, create_2fa_challenge, encrypt_session, decrypt_session
 from .config import settings
 from . import telegram_service as tg
@@ -143,7 +143,7 @@ with SessionLocal() as _migration_db:
         _user.public_id = make_public_user_id(_migration_db)
     _migration_db.commit()
 
-app = FastAPI(title='X-Wallet Chat Management', version='7.7.1')
+app = FastAPI(title='X-Wallet Chat Management', version='7.7.2')
 # Memory cache prevents connected-account avatar refresh from failing on a full Railway volume.
 _TELEGRAM_ACCOUNT_AVATAR_CACHE: dict[int, bytes] = {}
 app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins.split(','), allow_credentials=False, allow_methods=['*'], allow_headers=['*'])
@@ -153,7 +153,7 @@ class LoginIn(BaseModel): username: str; password: str
 class TwoFactorVerifyIn(BaseModel): challenge_token: str; code: str
 class TwoFactorCodeIn(BaseModel): code: str
 class ForwardIn(BaseModel): target_customer_id: int
-class UserIn(BaseModel): username: str; password: str = Field(min_length=10); role: str = 'chatting'; team_id: int | None = None; permissions: list[str] = Field(default_factory=list)
+class UserIn(BaseModel): username: str; password: str = Field(min_length=10); role: str = 'chatting'; team_id: int | None = None; auto_team: bool = True; permissions: list[str] = Field(default_factory=list)
 class UserPermissionsIn(BaseModel): permissions: list[str] = Field(default_factory=list)
 class TeamIn(BaseModel): name: str
 class PhoneIn(BaseModel): phone: str
@@ -163,6 +163,8 @@ class BulkAssignIn(BaseModel): customer_ids: list[int]; user_id: int; account_id
 class SendIn(BaseModel): text: str = Field(min_length=1, max_length=4096)
 class TagIn(BaseModel): key: str; value: str; scope: str = 'private'
 class EmployeeAlertConfigIn(BaseModel): bot_token: str = ''; chat_ids: list[str] = Field(default_factory=list); enabled: bool = True
+class AttendanceIdentityIn(BaseModel): user_id: int; telegram_user_id: str
+class AttendanceBotConfigIn(BaseModel): bot_token: str = ''; bot_id: str = ''; group_chat_id: str = ''; enabled: bool = True; employees: list[AttendanceIdentityIn] = Field(default_factory=list)
 
 UPLOAD_ROOT = os.path.abspath(settings.upload_dir)
 os.makedirs(UPLOAD_ROOT, exist_ok=True)
@@ -222,6 +224,7 @@ async def startup():
             db.add(User(username=settings.admin_username, public_id=make_public_user_id(db), password_hash=hash_password(settings.admin_password), role='superadmin', active=True)); db.commit()
     finally: db.close()
     app.state.employee_alert_task = asyncio.create_task(employee_offline_alert_loop())
+    app.state.attendance_bot_task = asyncio.create_task(attendance_bot_loop())
     if settings.telegram_api_id and settings.telegram_api_hash and settings.session_encryption_key:
         # Await restoration so Sync buttons cannot race startup and report a false
         # 'not connected' state while the account is still being rehydrated.
@@ -229,13 +232,14 @@ async def startup():
 
 @app.on_event('shutdown')
 async def shutdown_employee_alerts():
-    task = getattr(app.state, 'employee_alert_task', None)
-    if task:
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+    for name in ('employee_alert_task', 'attendance_bot_task'):
+        task = getattr(app.state, name, None)
+        if task:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
 
 @app.get('/')
@@ -543,12 +547,18 @@ def create_user(data: UserIn, request: Request, db: Session = Depends(get_db), a
         raise HTTPException(400, 'Password must be no more than 72 UTF-8 bytes for the current password-hash algorithm')
     if db.query(User).filter(func.lower(User.username) == username.lower()).first():
         raise HTTPException(409, 'Username already exists (usernames are case-insensitive)')
-    if data.team_id is not None and not db.get(Team, data.team_id):
+    resolved_team_id = data.team_id
+    if resolved_team_id is None and getattr(data, 'auto_team', True):
+        team_name = {'chatting': 'Chatting', 'finding': 'Finding', 'admin': 'Admin'}.get(data.role)
+        if team_name:
+            matched_team = db.query(Team).filter(func.lower(Team.name) == team_name.lower()).first()
+            resolved_team_id = matched_team.id if matched_team else None
+    if resolved_team_id is not None and not db.get(Team, resolved_team_id):
         raise HTTPException(404, 'Team not found')
     try:
         u = User(username=username, public_id=make_public_user_id(db),
                  password_hash=hash_password(data.password), role=data.role,
-                 team_id=data.team_id, created_by_user_id=actor.id, active=True,
+                 team_id=resolved_team_id, created_by_user_id=actor.id, active=True,
                  permissions=json.dumps(sorted({p for p in data.permissions if p in ADMIN_PERMISSION_KEYS}) if data.role == 'admin' else []))
         db.add(u)
         db.flush()
@@ -636,7 +646,7 @@ def create_team(data:TeamIn, db:Session=Depends(get_db), actor:User=Depends(admi
 
 @app.get('/api/admin/teams')
 def list_teams(db:Session=Depends(get_db), actor:User=Depends(admin)):
-    require_any_permission(actor, 'teams.manage','users.manage_team')
+    require_any_permission(actor, 'teams.manage','users.manage_team','users.create_employee','users.create_admin')
     return [{'id':t.id,'name':t.name} for t in db.query(Team).all()]
 
 @app.patch('/api/admin/users/{uid}/team')
@@ -820,7 +830,9 @@ def assign(data:AssignIn, db:Session=Depends(get_db), actor:User=Depends(admin))
     # Reassignment revokes old active assignments but never deletes history/messages/tags.
     old=db.query(Assignment).filter_by(customer_id=c.id,active=True).all()
     for a in old: a.active=False; a.revoked_at=datetime.now(timezone.utc)
-    assignment=Assignment(customer_id=c.id,user_id=u.id,assigned_by=actor.id,active=True); db.add(assignment); db.commit(); audit(db,actor,'customer.assign','customer',c.id,f'to_user={u.id}'); return {'ok':True,'history_preserved':True,'customer_id':c.id,'user_id':u.id,'public_user_id':u.public_id,'username':u.username,'assignment_id':assignment.id}
+    assignment=Assignment(customer_id=c.id,user_id=u.id,assigned_by=actor.id,active=True); db.add(assignment); db.flush()
+    db.add(InboxNotification(user_id=u.id, kind='customer_assigned', title='New customer assigned', body=f'A customer conversation has been assigned to you: {c.alias or ("Customer #"+str(c.id))}. Please open Chat Workspace.', customer_id=c.id))
+    db.commit(); audit(db,actor,'customer.assign','customer',c.id,f'to_user={u.id}'); return {'ok':True,'history_preserved':True,'customer_id':c.id,'user_id':u.id,'public_user_id':u.public_id,'username':u.username,'assignment_id':assignment.id}
 
 @app.post('/api/admin/assign/bulk')
 def bulk_assign(data:BulkAssignIn, db:Session=Depends(get_db), actor:User=Depends(admin)):
@@ -839,6 +851,7 @@ def bulk_assign(data:BulkAssignIn, db:Session=Depends(get_db), actor:User=Depend
         if not c: continue
         for a in db.query(Assignment).filter_by(customer_id=cid,active=True).all(): a.active=False; a.revoked_at=datetime.now(timezone.utc)
         db.add(Assignment(customer_id=cid,user_id=u.id,assigned_by=actor.id,active=True))
+        db.add(InboxNotification(user_id=u.id, kind='customer_assigned', title='New customer assigned', body=f'A customer conversation has been assigned to you: {c.alias or ("Customer #"+str(c.id))}. Please open Chat Workspace.', customer_id=cid))
     db.commit(); audit(db,actor,'customer.bulk_assign','user',u.id,f'count={len(data.customer_ids)}'); return {'ok':True,'count':len(data.customer_ids)}
 
 @app.post('/api/admin/revoke/{customer_id}')
@@ -847,6 +860,19 @@ def revoke(customer_id:int, db:Session=Depends(get_db), actor:User=Depends(admin
     rows=db.query(Assignment).filter_by(customer_id=customer_id,active=True).all()
     for a in rows: a.active=False; a.revoked_at=datetime.now(timezone.utc)
     db.commit(); audit(db,actor,'customer.revoke','customer',customer_id); return {'ok':True,'revoked':len(rows),'history_preserved':True}
+
+@app.get('/api/notifications')
+def get_notifications(db: Session = Depends(get_db), user: User = Depends(current_user)):
+    rows = db.query(InboxNotification).filter_by(user_id=user.id, is_read=False).order_by(desc(InboxNotification.id)).limit(30).all()
+    return [{'id':n.id,'kind':n.kind,'title':n.title,'body':n.body,'customer_id':n.customer_id,'created_at':utc_iso(n.created_at)} for n in rows]
+
+@app.post('/api/notifications/read')
+def mark_notifications_read(data: dict, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    ids = [int(v) for v in (data.get('ids') or []) if str(v).isdigit()][:100]
+    if ids:
+        db.query(InboxNotification).filter(InboxNotification.user_id==user.id, InboxNotification.id.in_(ids)).update({InboxNotification.is_read: True}, synchronize_session=False)
+        db.commit()
+    return {'ok': True, 'count': len(ids)}
 
 @app.get('/api/inbox')
 def inbox(filter:str='all', db:Session=Depends(get_db), user:User=Depends(current_user)):
@@ -1106,6 +1132,114 @@ def save_employee_offline_alert_config(data: EmployeeAlertConfigIn, db: Session 
     audit(db, actor, 'employee.offline_alert_config.update', 'settings', 'employee_offline_alert', f'enabled={row.enabled}; recipients={len(chat_ids)}')
     return {'ok': True, 'enabled': row.enabled, 'chat_ids': chat_ids, 'bot_token_configured': bool(row.bot_token_ciphertext)}
 
+@app.get('/api/admin/attendance/config')
+def get_attendance_config(db: Session = Depends(get_db), actor: User = Depends(superadmin)):
+    cfg = db.get(AttendanceBotConfig, 1)
+    identities = db.query(EmployeeTelegramIdentity, User).join(User, User.id==EmployeeTelegramIdentity.user_id).order_by(User.username).all()
+    return {'enabled': bool(cfg.enabled) if cfg else False, 'bot_id': cfg.bot_id if cfg else '', 'group_chat_id': cfg.group_chat_id if cfg else '', 'bot_token_configured': bool(cfg and cfg.bot_token_ciphertext), 'employees': [{'user_id':u.id,'username':u.username,'role':u.role,'telegram_user_id':ident.telegram_user_id} for ident,u in identities]}
+
+@app.put('/api/admin/attendance/config')
+def save_attendance_config(data: AttendanceBotConfigIn, db: Session = Depends(get_db), actor: User = Depends(superadmin)):
+    bot_id = (data.bot_id or '').strip()
+    group_id = (data.group_chat_id or '').strip()
+    token = (data.bot_token or '').strip()
+    if bot_id and not re.fullmatch(r'\d{5,15}', bot_id):
+        raise HTTPException(400, 'Bot ID must be numeric.')
+    if group_id and not re.fullmatch(r'-?\d{5,20}', group_id):
+        raise HTTPException(400, 'Group Chat ID must be a numeric Telegram chat ID.')
+    if token and not re.fullmatch(r'\d{5,15}:[A-Za-z0-9_-]{20,}', token):
+        raise HTTPException(400, 'Attendance Bot Token format is invalid.')
+    token_bot_id = token.split(':',1)[0] if token else ''
+    if token and bot_id and bot_id != token_bot_id:
+        raise HTTPException(400, 'Bot ID does not match the numeric ID at the beginning of the Bot Token.')
+    if token and not bot_id: bot_id = token_bot_id
+    cfg = db.get(AttendanceBotConfig, 1)
+    if cfg is None:
+        cfg = AttendanceBotConfig(id=1, bot_token_ciphertext='', bot_id='', group_chat_id='', enabled=False, last_update_id=0); db.add(cfg)
+    if token:
+        cfg.bot_token_ciphertext = encrypt_session(token)
+        if not bot_id: bot_id = token.split(':',1)[0]
+    if not bot_id and cfg.bot_id: bot_id = cfg.bot_id
+    cfg.bot_id, cfg.group_chat_id, cfg.enabled = bot_id, group_id, bool(data.enabled)
+    if not cfg.enabled:
+        db.query(EmployeeBreakState).update({EmployeeBreakState.break_started_at: None, EmployeeBreakState.last_return_at: datetime.now(timezone.utc)}, synchronize_session=False)
+    seen_ids, seen_users = set(), set()
+    for item in data.employees:
+        telegram_id = str(item.telegram_user_id).strip()
+        target = db.get(User, item.user_id)
+        if not target or target.role not in ('employee','chatting','finding','admin') or not target.active:
+            raise HTTPException(400, f'Invalid active employee account ID: {item.user_id}')
+        if not re.fullmatch(r'\d{3,20}', telegram_id):
+            raise HTTPException(400, f'Telegram user ID for {target.username} must be numeric.')
+        if telegram_id in seen_ids or item.user_id in seen_users:
+            raise HTTPException(400, 'Each employee and Telegram user ID can only appear once.')
+        seen_ids.add(telegram_id); seen_users.add(item.user_id)
+    db.query(EmployeeTelegramIdentity).delete(synchronize_session=False)
+    for item in data.employees:
+        db.add(EmployeeTelegramIdentity(user_id=item.user_id, telegram_user_id=str(item.telegram_user_id).strip()))
+    db.commit()
+    audit(db, actor, 'employee.attendance_bot_config.update', 'settings', 'attendance_bot', f'enabled={cfg.enabled}; employees={len(data.employees)}')
+    return {'ok': True, 'enabled': cfg.enabled, 'bot_id': cfg.bot_id, 'group_chat_id': cfg.group_chat_id, 'bot_token_configured': bool(cfg.bot_token_ciphertext), 'employees': len(data.employees)}
+
+async def attendance_bot_loop():
+    """Dedicated attendance bot: employees send /break and /back in the configured group."""
+    import httpx
+    while True:
+        try:
+            with SessionLocal() as db:
+                cfg = db.get(AttendanceBotConfig, 1)
+                if not cfg or not cfg.enabled or not cfg.bot_token_ciphertext or not cfg.group_chat_id:
+                    await asyncio.sleep(5); continue
+                try: bot_token = decrypt_session(cfg.bot_token_ciphertext)
+                except Exception as exc:
+                    print('attendance bot token decrypt failed:', repr(exc)); await asyncio.sleep(10); continue
+                offset = int(cfg.last_update_id or 0) + 1
+                group_id = str(cfg.group_chat_id)
+                identities = {str(row.telegram_user_id): row.user_id for row in db.query(EmployeeTelegramIdentity).all()}
+            async with httpx.AsyncClient(timeout=6.0) as client:
+                response = await client.get(f'https://api.telegram.org/bot{bot_token}/getUpdates', params={'offset':offset,'timeout':0,'allowed_updates':json.dumps(['message'])})
+                payload = response.json()
+                if payload.get('ok'):
+                    for update in payload.get('result', []):
+                        update_id = int(update.get('update_id', 0))
+                        message = update.get('message') or {}
+                        chat = message.get('chat') or {}
+                        sender = message.get('from') or {}
+                        text_value = str(message.get('text') or '').strip().lower()
+                        if str(chat.get('id','')) == group_id and str(sender.get('id','')) in identities and text_value.startswith('/'):
+                            command = text_value.split()[0].split('@')[0]
+                            user_id = identities[str(sender.get('id'))]
+                            now_utc = datetime.now(timezone.utc)
+                            with SessionLocal() as db:
+                                employee = db.get(User, user_id)
+                                state = db.get(EmployeeBreakState, user_id)
+                                if employee and employee.active and command in ('/break','/breakout','/out'):
+                                    if state is None: state = EmployeeBreakState(user_id=user_id); db.add(state)
+                                    if state.break_started_at is None:
+                                        state.break_started_at = now_utc; state.last_action = 'break'
+                                    db.commit()
+                                    local = now_utc.astimezone(ZoneInfo('Asia/Yangon'))
+                                    reply = f'{employee.username} started a break at {local.strftime("%Y-%m-%d %H:%M:%S")} MMT.'
+                                elif employee and employee.active and command in ('/back','/return','/in'):
+                                    if state is None: state = EmployeeBreakState(user_id=user_id); db.add(state)
+                                    state.break_started_at = None; state.last_return_at = now_utc; state.last_action = 'back'; db.commit()
+                                    local = now_utc.astimezone(ZoneInfo('Asia/Yangon'))
+                                    reply = f'{employee.username} returned at {local.strftime("%Y-%m-%d %H:%M:%S")} MMT. Offline timer has been reset.'
+                                else:
+                                    reply = ''
+                            if reply:
+                                try: await client.post(f'https://api.telegram.org/bot{bot_token}/sendMessage', json={'chat_id':group_id,'text':reply})
+                                except Exception as exc: print('attendance bot reply failed:', repr(exc))
+                        with SessionLocal() as db:
+                            latest = db.get(AttendanceBotConfig, 1)
+                            if latest:
+                                latest.last_update_id = max(int(latest.last_update_id or 0), update_id); db.commit()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print('attendance bot polling error:', repr(exc))
+        await asyncio.sleep(5)
+
 async def employee_offline_alert_loop():
     """Poll presence and send one Telegram alert per offline episode during Myanmar night hours."""
     import httpx
@@ -1133,6 +1267,9 @@ async def employee_offline_alert_loop():
                                 last_seen = latest.last_seen
                                 if last_seen.tzinfo is None: last_seen = last_seen.replace(tzinfo=timezone.utc)
                                 online = latest.is_active and (datetime.now(timezone.utc) - last_seen).total_seconds() <= 90
+                                break_state = db.get(EmployeeBreakState, user.id)
+                                if break_state and break_state.break_started_at:
+                                    continue
                                 state = db.query(EmployeeAlertState).filter_by(user_id=user.id).first()
                                 if online:
                                     if state and state.offline_key:
@@ -1141,8 +1278,12 @@ async def employee_offline_alert_loop():
                                     continue
                                 offline_since = latest.logout_at or last_seen
                                 if offline_since.tzinfo is None: offline_since = offline_since.replace(tzinfo=timezone.utc)
+                                if break_state and break_state.last_return_at:
+                                    returned = break_state.last_return_at
+                                    if returned.tzinfo is None: returned = returned.replace(tzinfo=timezone.utc)
+                                    offline_since = max(offline_since, returned)
                                 elapsed = (datetime.now(timezone.utc) - offline_since).total_seconds()
-                                if elapsed < 600:
+                                if elapsed < 900:
                                     continue
                                 event_key = offline_since.astimezone(timezone.utc).isoformat(timespec='seconds')
                                 if state and state.offline_key == event_key and state.notified_at:

@@ -218,3 +218,7 @@ In the X-Wallet service Variables, set `DATABASE_URL` to the Railway PostgreSQL 
 
 ## v7.6.4 operational note
 Railway reported `OSError(28): No space left on device` during Telegram account avatar writes. This release serves connected-account profile photos from process memory to avoid that particular write. It is not a substitute for freeing/increasing the Railway volume: message media and other uploads still need disk space. The in-memory avatar cache is lost when the process restarts and is repopulated when an admin refreshes the connected account profile.
+
+
+## v7.7.2 additions
+See `PATCH_NOTES_v7.7.2.md` for the employee role/team auto-mapping, Google Translate sidebar panel, persistent assignment notifications with browser speech, and Telegram attendance bot setup. Attendance commands are `/break` and `/back`; break periods pause offline alerts and the threshold is 15 minutes.

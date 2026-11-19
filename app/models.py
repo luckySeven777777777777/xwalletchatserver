@@ -136,3 +136,39 @@ class EmployeeAlertState(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), unique=True, index=True)
     offline_key: Mapped[str] = mapped_column(String(80), default='')
     notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class InboxNotification(Base):
+    __tablename__ = 'inbox_notifications'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    kind: Mapped[str] = mapped_column(String(40), default='customer_assigned')
+    title: Mapped[str] = mapped_column(String(180), default='New customer assigned')
+    body: Mapped[str] = mapped_column(Text, default='')
+    customer_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    is_read: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
+
+class AttendanceBotConfig(Base):
+    __tablename__ = 'attendance_bot_config'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    bot_token_ciphertext: Mapped[str] = mapped_column(Text, default='')
+    bot_id: Mapped[str] = mapped_column(String(40), default='')
+    group_chat_id: Mapped[str] = mapped_column(String(40), default='')
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    last_update_id: Mapped[int] = mapped_column(Integer, default=0)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
+
+class EmployeeTelegramIdentity(Base):
+    __tablename__ = 'employee_telegram_identities'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), unique=True, index=True)
+    telegram_user_id: Mapped[str] = mapped_column(String(40), unique=True, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
+
+class EmployeeBreakState(Base):
+    __tablename__ = 'employee_break_states'
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), primary_key=True)
+    break_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_return_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_action: Mapped[str] = mapped_column(String(20), default='')
