@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import desc, text, func, inspect
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from .db import Base, engine, get_db, SessionLocal
-from .models import User, Team, TgAccount, Customer, Assignment, Message, Tag, AuditLog, ReadState, PresenceSession, EmployeeAlertConfig, EmployeeAlertState, InboxNotification, AttendanceBotConfig, EmployeeTelegramIdentity, EmployeeBreakState
+from .models import User, Team, TgAccount, Customer, Assignment, Message, Tag, AuditLog, ReadState, PresenceSession, EmployeeAlertConfig, EmployeeAlertState, InboxNotification, AttendanceBotConfig, EmployeeTelegramIdentity, EmployeeBreakState, EmployeeAttendanceEvent
 from .security import hash_password, verify_password, create_token, decode_token, create_2fa_challenge, encrypt_session, decrypt_session
 from .config import settings
 from . import telegram_service as tg
@@ -143,7 +143,7 @@ with SessionLocal() as _migration_db:
         _user.public_id = make_public_user_id(_migration_db)
     _migration_db.commit()
 
-app = FastAPI(title='X-Wallet Chat Management', version='7.7.2')
+app = FastAPI(title='X-Wallet Chat Management', version='7.7.3')
 # Memory cache prevents connected-account avatar refresh from failing on a full Railway volume.
 _TELEGRAM_ACCOUNT_AVATAR_CACHE: dict[int, bytes] = {}
 app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins.split(','), allow_credentials=False, allow_methods=['*'], allow_headers=['*'])
@@ -1181,6 +1181,22 @@ def save_attendance_config(data: AttendanceBotConfigIn, db: Session = Depends(ge
     audit(db, actor, 'employee.attendance_bot_config.update', 'settings', 'attendance_bot', f'enabled={cfg.enabled}; employees={len(data.employees)}')
     return {'ok': True, 'enabled': cfg.enabled, 'bot_id': cfg.bot_id, 'group_chat_id': cfg.group_chat_id, 'bot_token_configured': bool(cfg.bot_token_ciphertext), 'employees': len(data.employees)}
 
+@app.get('/api/admin/attendance/records')
+def get_attendance_records(user_id: int | None = None, db: Session = Depends(get_db), actor: User = Depends(admin)):
+    require_permission(actor, 'stats.view')
+    tz = ZoneInfo('Asia/Yangon')
+    now_local = datetime.now(tz)
+    day_start = now_local.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
+    query = db.query(EmployeeAttendanceEvent, User).join(User, User.id == EmployeeAttendanceEvent.user_id).filter(EmployeeAttendanceEvent.started_at >= day_start)
+    if user_id is not None: query = query.filter(EmployeeAttendanceEvent.user_id == user_id)
+    rows = query.order_by(desc(EmployeeAttendanceEvent.started_at)).limit(500).all()
+    users = db.query(User).filter(User.role.in_(('employee','chatting','finding','admin'))).order_by(User.username).all()
+    now_utc = datetime.now(timezone.utc)
+    total_count = db.query(func.count(EmployeeAttendanceEvent.id)).filter(EmployeeAttendanceEvent.started_at >= day_start).scalar() or 0
+    count_query = db.query(func.count(EmployeeAttendanceEvent.id)).filter(EmployeeAttendanceEvent.started_at >= day_start)
+    if user_id is not None: count_query = count_query.filter(EmployeeAttendanceEvent.user_id == user_id)
+    return {'today_count': total_count, 'filtered_count': count_query.scalar() or 0, 'employees': [{'id':u.id,'username':u.username} for u in users], 'records': [{'id':e.id,'user_id':u.id,'username':u.username,'break_type':e.break_type,'started_at':utc_iso(e.started_at),'returned_at':utc_iso(e.returned_at),'duration_seconds':(e.duration_seconds if e.duration_seconds is not None else max(0, int((now_utc - (e.started_at if e.started_at.tzinfo else e.started_at.replace(tzinfo=timezone.utc))).total_seconds())))} for e,u in rows]}
+
 async def attendance_bot_loop():
     """Dedicated attendance bot: employees send /break and /back in the configured group."""
     import httpx
@@ -1207,21 +1223,34 @@ async def attendance_bot_loop():
                         sender = message.get('from') or {}
                         text_value = str(message.get('text') or '').strip().lower()
                         if str(chat.get('id','')) == group_id and str(sender.get('id','')) in identities and text_value.startswith('/'):
-                            command = text_value.split()[0].split('@')[0]
+                            parts = text_value.split()
+                            command = parts[0].split('@')[0]
+                            reason_aliases = {'eat':'Eat','/eat':'Eat','smoking':'Smoking','/smoking':'Smoking','pee':'Pee','/pee':'Pee','toilet':'Tolied','/toilet':'Tolied','toliet':'Tolied','/toliet':'Tolied','other':'Other','/other':'Other'}
+                            reason = reason_aliases.get(parts[1] if len(parts)>1 else '', 'Other')
+                            direct_reason = {'/eat':'Eat','/smoking':'Smoking','/pee':'Pee','/toilet':'Tolied','/toliet':'Tolied','/tolied':'Tolied','/other':'Other'}
+                            if command in direct_reason: reason = direct_reason[command]
                             user_id = identities[str(sender.get('id'))]
                             now_utc = datetime.now(timezone.utc)
                             with SessionLocal() as db:
                                 employee = db.get(User, user_id)
                                 state = db.get(EmployeeBreakState, user_id)
-                                if employee and employee.active and command in ('/break','/breakout','/out'):
+                                if employee and employee.active and command in ('/break','/breakout','/out','/eat','/smoking','/pee','/toilet','/toliet','/tolied','/other'):
                                     if state is None: state = EmployeeBreakState(user_id=user_id); db.add(state)
                                     if state.break_started_at is None:
                                         state.break_started_at = now_utc; state.last_action = 'break'
+                                        db.add(EmployeeAttendanceEvent(user_id=user_id, break_type=reason, started_at=now_utc))
                                     db.commit()
                                     local = now_utc.astimezone(ZoneInfo('Asia/Yangon'))
-                                    reply = f'{employee.username} started a break at {local.strftime("%Y-%m-%d %H:%M:%S")} MMT.'
+                                    reply = f'{employee.username} started {reason} at {local.strftime("%Y-%m-%d %H:%M:%S")} MMT.'
                                 elif employee and employee.active and command in ('/back','/return','/in'):
                                     if state is None: state = EmployeeBreakState(user_id=user_id); db.add(state)
+                                    if state.break_started_at is not None:
+                                        started = state.break_started_at
+                                        if started.tzinfo is None: started = started.replace(tzinfo=timezone.utc)
+                                        event = db.query(EmployeeAttendanceEvent).filter(EmployeeAttendanceEvent.user_id==user_id, EmployeeAttendanceEvent.returned_at.is_(None)).order_by(desc(EmployeeAttendanceEvent.started_at)).first()
+                                        if event:
+                                            event.returned_at = now_utc
+                                            event.duration_seconds = max(0, int((now_utc-started).total_seconds()))
                                     state.break_started_at = None; state.last_return_at = now_utc; state.last_action = 'back'; db.commit()
                                     local = now_utc.astimezone(ZoneInfo('Asia/Yangon'))
                                     reply = f'{employee.username} returned at {local.strftime("%Y-%m-%d %H:%M:%S")} MMT. Offline timer has been reset.'
@@ -1389,7 +1418,17 @@ def stats(db:Session=Depends(get_db), actor:User=Depends(admin)):
         online_seconds = int(max(0, ((now_utc if online else (logout_at or last_seen)) - login_at).total_seconds())) if login_at and (online or logout_at or last_seen) else 0
         offline_base = (session.logout_at if session and session.logout_at else last_seen)
         offline_base = offline_base if not offline_base or offline_base.tzinfo else offline_base.replace(tzinfo=timezone.utc)
-        offline_seconds = int(max(0, (now_utc - offline_base).total_seconds())) if (not online and offline_base) else None
+        break_state = db.get(EmployeeBreakState, u.id)
+        on_break = bool(break_state and break_state.break_started_at)
+        active_break = db.query(EmployeeAttendanceEvent).filter(EmployeeAttendanceEvent.user_id==u.id, EmployeeAttendanceEvent.returned_at.is_(None)).order_by(desc(EmployeeAttendanceEvent.started_at)).first() if on_break else None
+        if on_break:
+            offline_seconds = 0
+        else:
+            if break_state and break_state.last_return_at and offline_base:
+                returned = break_state.last_return_at
+                if returned.tzinfo is None: returned = returned.replace(tzinfo=timezone.utc)
+                offline_base = max(offline_base, returned)
+            offline_seconds = int(max(0, (now_utc - offline_base).total_seconds())) if (not online and offline_base) else None
         creator = related_users.get(u.created_by_user_id) if u.created_by_user_id else None
         last_op = last_op_by_user.get(u.id)
         operator = related_users.get(last_op.actor_user_id) if last_op and last_op.actor_user_id else None
@@ -1397,7 +1436,7 @@ def stats(db:Session=Depends(get_db), actor:User=Depends(admin)):
             'id': u.id, 'public_id': u.public_id, 'username': u.username, 'role': u.role,
             'active': u.active, 'online': online, 'channel': session.channel if session else 'Telegram',
             'login_at': utc_iso(login_at), 'logout_at': utc_iso(logout_at), 'last_seen': utc_iso(last_seen),
-            'online_seconds': online_seconds, 'offline_seconds': offline_seconds,
+            'online_seconds': online_seconds, 'offline_seconds': offline_seconds, 'on_break': on_break, 'break_type': active_break.break_type if active_break else '',
             'today_received_members': today_received_by_user.get(u.id, 0), 'today_member_messages': today_inbound,
             'today_sent_messages': sent_by_user.get(u.username, 0), 'assigned_members': len(assigned_customer_ids),
             'created_at': utc_iso(u.created_at), 'created_by': creator.username if creator else 'System',
@@ -1412,6 +1451,7 @@ def stats(db:Session=Depends(get_db), actor:User=Depends(admin)):
         'employees': len(users), 'online_last_5m': online_count, 'online_members': online_count,
         'active_conversations': active_assignments, 'today_received': today_new,
         'today_messages': today_messages, 'telegram_accounts': db.query(func.count(TgAccount.id)).scalar() or 0,
+        'today_attendance_count': db.query(func.count(EmployeeAttendanceEvent.id)).filter(EmployeeAttendanceEvent.started_at >= today_start).scalar() or 0,
         'staff': staff
     }
 

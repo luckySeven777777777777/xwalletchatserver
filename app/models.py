@@ -172,3 +172,13 @@ class EmployeeBreakState(Base):
     break_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_return_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_action: Mapped[str] = mapped_column(String(20), default='')
+
+
+class EmployeeAttendanceEvent(Base):
+    __tablename__ = 'employee_attendance_events'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    break_type: Mapped[str] = mapped_column(String(20), default='Other')
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
+    returned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    duration_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)

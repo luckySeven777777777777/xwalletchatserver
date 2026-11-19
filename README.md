@@ -1,4 +1,4 @@
-## Current release: v7.7.1
+## Current release: v7.7.3
 
 See `PATCH_NOTES_v7.7.1.md` for fast admin action behavior and Telegram employee offline notifications.
 
@@ -222,3 +222,7 @@ Railway reported `OSError(28): No space left on device` during Telegram account 
 
 ## v7.7.2 additions
 See `PATCH_NOTES_v7.7.2.md` for the employee role/team auto-mapping, Google Translate sidebar panel, persistent assignment notifications with browser speech, and Telegram attendance bot setup. Attendance commands are `/break` and `/back`; break periods pause offline alerts and the threshold is 15 minutes.
+
+
+## v7.7.3 additions
+See `PATCH_NOTES_v7.7.3.md` for removal of the Google Translate sidebar, the 3-column by 2-row admin module layout, daily attendance counts and per-employee attendance records. Attendance break commands accept `/break eat`, `/break smoking`, `/break pee`, `/break tolied`, `/break other` (or direct `/eat`, `/smoking`, `/pee`, `/tolied`, `/other`) and `/back`. Break time is excluded from offline duration and offline-alert timing resumes from the return timestamp.
