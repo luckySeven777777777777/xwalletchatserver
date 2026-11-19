@@ -224,7 +224,8 @@ async def startup():
             db.add(User(username=settings.admin_username, public_id=make_public_user_id(db), password_hash=hash_password(settings.admin_password), role='superadmin', active=True)); db.commit()
     finally: db.close()
     app.state.employee_alert_task = asyncio.create_task(employee_offline_alert_loop())
-    app.state.attendance_bot_task = asyncio.create_task(attendance_bot_loop())
+    # Attendance Bot A runs in its own Railway service. This app only accepts
+    # signed attendance events; it must never call getUpdates for Bot A.
     if settings.telegram_api_id and settings.telegram_api_hash and settings.session_encryption_key:
         # Await restoration so Sync buttons cannot race startup and report a false
         # 'not connected' state while the account is still being rehydrated.
@@ -232,7 +233,7 @@ async def startup():
 
 @app.on_event('shutdown')
 async def shutdown_employee_alerts():
-    for name in ('employee_alert_task', 'attendance_bot_task'):
+    for name in ('employee_alert_task',):
         task = getattr(app.state, name, None)
         if task:
             task.cancel()
@@ -1195,79 +1196,76 @@ def get_attendance_records(user_id: int | None = None, db: Session = Depends(get
     total_count = db.query(func.count(EmployeeAttendanceEvent.id)).filter(EmployeeAttendanceEvent.started_at >= day_start).scalar() or 0
     count_query = db.query(func.count(EmployeeAttendanceEvent.id)).filter(EmployeeAttendanceEvent.started_at >= day_start)
     if user_id is not None: count_query = count_query.filter(EmployeeAttendanceEvent.user_id == user_id)
-    return {'today_count': total_count, 'filtered_count': count_query.scalar() or 0, 'employees': [{'id':u.id,'username':u.username} for u in users], 'records': [{'id':e.id,'user_id':u.id,'username':u.username,'break_type':e.break_type,'started_at':utc_iso(e.started_at),'returned_at':utc_iso(e.returned_at),'duration_seconds':(e.duration_seconds if e.duration_seconds is not None else max(0, int((now_utc - (e.started_at if e.started_at.tzinfo else e.started_at.replace(tzinfo=timezone.utc))).total_seconds())))} for e,u in rows]}
+    category_query = db.query(EmployeeAttendanceEvent.break_type, func.count(EmployeeAttendanceEvent.id)).filter(EmployeeAttendanceEvent.started_at >= day_start)
+    if user_id is not None: category_query = category_query.filter(EmployeeAttendanceEvent.user_id == user_id)
+    raw_counts = dict(category_query.group_by(EmployeeAttendanceEvent.break_type).all())
+    type_counts = {name: int(raw_counts.get(name, 0)) for name in ('Eat','Smoking','Pee','Tolied','Other')}
+    return {'today_count': total_count, 'filtered_count': count_query.scalar() or 0, 'type_counts': type_counts, 'employees': [{'id':u.id,'username':u.username} for u in users], 'records': [{'id':e.id,'user_id':u.id,'username':u.username,'break_type':e.break_type,'started_at':utc_iso(e.started_at),'returned_at':utc_iso(e.returned_at),'duration_seconds':(e.duration_seconds if e.duration_seconds is not None else max(0, int((now_utc - (e.started_at if e.started_at.tzinfo else e.started_at.replace(tzinfo=timezone.utc))).total_seconds())))} for e,u in rows]}
 
-async def attendance_bot_loop():
-    """Dedicated attendance bot: employees send /break and /back in the configured group."""
-    import httpx
-    while True:
+class AttendanceIngestIn(BaseModel):
+    action: str  # break | return
+    telegram_user_id: str
+    group_chat_id: str = ''
+    break_type: str = 'Other'
+    event_at: str = ''
+
+@app.post('/api/integrations/attendance/events')
+def ingest_attendance_event(data: AttendanceIngestIn, x_attendance_secret: str = Header(default=''), db: Session = Depends(get_db)):
+    """Receive events pushed by the separately hosted employee check-in Bot A.
+
+    This endpoint deliberately does not poll Telegram and never calls getUpdates.
+    """
+    secret = settings.attendance_ingest_secret
+    if not secret:
+        raise HTTPException(503, 'Attendance event integration is not configured.')
+    if not hmac.compare_digest(x_attendance_secret or '', secret):
+        raise HTTPException(401, 'Invalid attendance integration secret.')
+    cfg = db.get(AttendanceBotConfig, 1)
+    if not cfg or not cfg.enabled:
+        raise HTTPException(409, 'Attendance integration is disabled in the admin dashboard.')
+    if cfg.group_chat_id and data.group_chat_id and str(cfg.group_chat_id) != str(data.group_chat_id):
+        raise HTTPException(403, 'Unexpected attendance group ID.')
+    identity = db.query(EmployeeTelegramIdentity).filter_by(telegram_user_id=str(data.telegram_user_id).strip()).first()
+    if not identity:
+        raise HTTPException(404, 'Telegram user ID is not mapped to an employee.')
+    employee = db.get(User, identity.user_id)
+    if not employee or not employee.active:
+        raise HTTPException(404, 'Mapped employee is not active.')
+    now_utc = datetime.now(timezone.utc)
+    event_time = now_utc
+    if data.event_at:
         try:
-            with SessionLocal() as db:
-                cfg = db.get(AttendanceBotConfig, 1)
-                if not cfg or not cfg.enabled or not cfg.bot_token_ciphertext or not cfg.group_chat_id:
-                    await asyncio.sleep(5); continue
-                try: bot_token = decrypt_session(cfg.bot_token_ciphertext)
-                except Exception as exc:
-                    print('attendance bot token decrypt failed:', repr(exc)); await asyncio.sleep(10); continue
-                offset = int(cfg.last_update_id or 0) + 1
-                group_id = str(cfg.group_chat_id)
-                identities = {str(row.telegram_user_id): row.user_id for row in db.query(EmployeeTelegramIdentity).all()}
-            async with httpx.AsyncClient(timeout=6.0) as client:
-                response = await client.get(f'https://api.telegram.org/bot{bot_token}/getUpdates', params={'offset':offset,'timeout':0,'allowed_updates':json.dumps(['message'])})
-                payload = response.json()
-                if payload.get('ok'):
-                    for update in payload.get('result', []):
-                        update_id = int(update.get('update_id', 0))
-                        message = update.get('message') or {}
-                        chat = message.get('chat') or {}
-                        sender = message.get('from') or {}
-                        text_value = str(message.get('text') or '').strip().lower()
-                        if str(chat.get('id','')) == group_id and str(sender.get('id','')) in identities and text_value.startswith('/'):
-                            parts = text_value.split()
-                            command = parts[0].split('@')[0]
-                            reason_aliases = {'eat':'Eat','/eat':'Eat','smoking':'Smoking','/smoking':'Smoking','pee':'Pee','/pee':'Pee','toilet':'Tolied','/toilet':'Tolied','toliet':'Tolied','/toliet':'Tolied','other':'Other','/other':'Other'}
-                            reason = reason_aliases.get(parts[1] if len(parts)>1 else '', 'Other')
-                            direct_reason = {'/eat':'Eat','/smoking':'Smoking','/pee':'Pee','/toilet':'Tolied','/toliet':'Tolied','/tolied':'Tolied','/other':'Other'}
-                            if command in direct_reason: reason = direct_reason[command]
-                            user_id = identities[str(sender.get('id'))]
-                            now_utc = datetime.now(timezone.utc)
-                            with SessionLocal() as db:
-                                employee = db.get(User, user_id)
-                                state = db.get(EmployeeBreakState, user_id)
-                                if employee and employee.active and command in ('/break','/breakout','/out','/eat','/smoking','/pee','/toilet','/toliet','/tolied','/other'):
-                                    if state is None: state = EmployeeBreakState(user_id=user_id); db.add(state)
-                                    if state.break_started_at is None:
-                                        state.break_started_at = now_utc; state.last_action = 'break'
-                                        db.add(EmployeeAttendanceEvent(user_id=user_id, break_type=reason, started_at=now_utc))
-                                    db.commit()
-                                    local = now_utc.astimezone(ZoneInfo('Asia/Yangon'))
-                                    reply = f'{employee.username} started {reason} at {local.strftime("%Y-%m-%d %H:%M:%S")} MMT.'
-                                elif employee and employee.active and command in ('/back','/return','/in'):
-                                    if state is None: state = EmployeeBreakState(user_id=user_id); db.add(state)
-                                    if state.break_started_at is not None:
-                                        started = state.break_started_at
-                                        if started.tzinfo is None: started = started.replace(tzinfo=timezone.utc)
-                                        event = db.query(EmployeeAttendanceEvent).filter(EmployeeAttendanceEvent.user_id==user_id, EmployeeAttendanceEvent.returned_at.is_(None)).order_by(desc(EmployeeAttendanceEvent.started_at)).first()
-                                        if event:
-                                            event.returned_at = now_utc
-                                            event.duration_seconds = max(0, int((now_utc-started).total_seconds()))
-                                    state.break_started_at = None; state.last_return_at = now_utc; state.last_action = 'back'; db.commit()
-                                    local = now_utc.astimezone(ZoneInfo('Asia/Yangon'))
-                                    reply = f'{employee.username} returned at {local.strftime("%Y-%m-%d %H:%M:%S")} MMT. Offline timer has been reset.'
-                                else:
-                                    reply = ''
-                            if reply:
-                                try: await client.post(f'https://api.telegram.org/bot{bot_token}/sendMessage', json={'chat_id':group_id,'text':reply})
-                                except Exception as exc: print('attendance bot reply failed:', repr(exc))
-                        with SessionLocal() as db:
-                            latest = db.get(AttendanceBotConfig, 1)
-                            if latest:
-                                latest.last_update_id = max(int(latest.last_update_id or 0), update_id); db.commit()
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            print('attendance bot polling error:', repr(exc))
-        await asyncio.sleep(5)
+            parsed = datetime.fromisoformat(data.event_at.replace('Z', '+00:00'))
+            event_time = parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
+        except ValueError:
+            raise HTTPException(400, 'event_at must be an ISO-8601 timestamp.')
+    action = data.action.strip().lower()
+    state = db.get(EmployeeBreakState, employee.id)
+    if state is None:
+        state = EmployeeBreakState(user_id=employee.id)
+        db.add(state)
+    if action in ('break', 'start', 'out'):
+        if state.break_started_at is None:
+            reason_aliases = {'eat':'Eat','eating':'Eat','smoking':'Smoking','pee':'Pee','toilet':'Tolied','toliet':'Tolied','tolied':'Tolied','other':'Other'}
+            reason = reason_aliases.get((data.break_type or 'Other').strip().lower(), 'Other')
+            state.break_started_at = event_time
+            state.last_action = 'break'
+            db.add(EmployeeAttendanceEvent(user_id=employee.id, break_type=reason, started_at=event_time))
+    elif action in ('return', 'back', 'in'):
+        if state.break_started_at is not None:
+            started = state.break_started_at
+            if started.tzinfo is None: started = started.replace(tzinfo=timezone.utc)
+            event = db.query(EmployeeAttendanceEvent).filter(EmployeeAttendanceEvent.user_id == employee.id, EmployeeAttendanceEvent.returned_at.is_(None)).order_by(desc(EmployeeAttendanceEvent.started_at)).first()
+            if event:
+                event.returned_at = event_time
+                event.duration_seconds = max(0, int((event_time - started).total_seconds()))
+        state.break_started_at = None
+        state.last_return_at = event_time
+        state.last_action = 'back'
+    else:
+        raise HTTPException(400, 'action must be break or return.')
+    db.commit()
+    return {'ok': True, 'employee': employee.username, 'action': action, 'recorded_at': utc_iso(event_time)}
 
 async def employee_offline_alert_loop():
     """Poll presence and send one Telegram alert per offline episode during Myanmar night hours."""

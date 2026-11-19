@@ -226,3 +226,7 @@ See `PATCH_NOTES_v7.7.2.md` for the employee role/team auto-mapping, Google Tran
 
 ## v7.7.3 additions
 See `PATCH_NOTES_v7.7.3.md` for removal of the Google Translate sidebar, the 3-column by 2-row admin module layout, daily attendance counts and per-employee attendance records. Attendance break commands accept `/break eat`, `/break smoking`, `/break pee`, `/break tolied`, `/break other` (or direct `/eat`, `/smoking`, `/pee`, `/tolied`, `/other`) and `/back`. Break time is excluded from offline duration and offline-alert timing resumes from the return timestamp.
+
+## v7.7.4 attendance integration (separate Bot A Railway service)
+
+The X-WALLET management service no longer polls the employee attendance bot. It never calls `getUpdates` for Bot A. Keep Bot A running in its current Railway service and push parsed `/break` and `/back` events to `POST /api/integrations/attendance/events` using the shared `ATTENDANCE_INGEST_SECRET` header. See `PATCH_NOTES_v7.7.4.md` for the exact Python helper and Railway variables. The Employee Attendance · Today panel now includes separate daily count cards for Eat, Smoking, Pee, Tolied, and Other.

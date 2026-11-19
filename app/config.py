@@ -18,6 +18,7 @@ class Settings:
     app_base_url: str = os.getenv("APP_BASE_URL", os.getenv("PUBLIC_APP_URL", "https://xwalletchatserver-production.up.railway.app"))
     cors_origins: str = os.getenv("CORS_ORIGINS", "*")
     upload_dir: str = os.getenv("UPLOAD_DIR") or ("/data/uploads" if os.path.isdir("/data") else "./uploads")
+    attendance_ingest_secret: str = os.getenv("ATTENDANCE_INGEST_SECRET", "")
 
 settings = Settings()
 # Never silently run a Railway production deployment on an ephemeral SQLite file.
