@@ -6,7 +6,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
-from sqlalchemy import desc, text, func, inspect
+from sqlalchemy import desc, text, func, inspect, and_
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from .db import Base, engine, get_db, SessionLocal
 from .models import User, Team, TgAccount, Customer, Assignment, Message, Tag, AuditLog, ReadState, PresenceSession, EmployeeAlertConfig, EmployeeAlertState, InboxNotification, AttendanceBotConfig, EmployeeTelegramIdentity, EmployeeBreakState, EmployeeAttendanceEvent, AttendanceIngestReceipt
@@ -144,7 +144,7 @@ with SessionLocal() as _migration_db:
         _user.public_id = make_public_user_id(_migration_db)
     _migration_db.commit()
 
-app = FastAPI(title='X-Wallet Chat Management', version='7.7.5')
+app = FastAPI(title='X-Wallet Chat Management', version='7.8.1')
 # Memory cache prevents connected-account avatar refresh from failing on a full Railway volume.
 _TELEGRAM_ACCOUNT_AVATAR_CACHE: dict[int, bytes] = {}
 # Restrict cross-origin browser access. Same-origin requests need no CORS entry.
@@ -918,22 +918,40 @@ def admin_telegram_account_avatar(account_id: int, actor: User = Depends(admin))
 @app.get('/api/admin/customers')
 def admin_customers(account_id:int|None=None, db:Session=Depends(get_db), actor:User=Depends(admin)):
     require_any_permission(actor, 'customers.assign','telegram.sync')
-    q=db.query(Customer)
+    q = db.query(Customer)
     if account_id is not None:
-        q=q.filter(Customer.account_id==account_id)
-    rows=q.order_by(Customer.account_id, Customer.real_name, Customer.real_username).all()
-    result=[]
-    for c in rows:
-        assigned=[]
-        for a in db.query(Assignment).filter_by(customer_id=c.id,active=True).all():
-            u=db.get(User,a.user_id)
-            if u: assigned.append({'user_id':u.public_id,'username':u.username})
-        result.append({'id':c.id,'alias':c.alias or c.real_name or ('@'+c.real_username if c.real_username else 'Telegram User'),
-            'telegram_username':c.real_username,'telegram_user_id':c.telegram_peer_id,'name':c.real_name,
-            'phone':c.phone,'account_id':c.account_id,'avatar_available':bool(c.avatar_path),
-            'dialog_folder':c.dialog_folder,'is_archived':c.dialog_folder == 1,
-            'is_saved_messages':bool(c.is_saved_messages),'assigned_to':assigned})
-    return result
+        q = q.filter(Customer.account_id == account_id)
+    rows = q.order_by(Customer.account_id, Customer.real_name, Customer.real_username).all()
+    customer_ids = [c.id for c in rows]
+    assignments_by_customer = {}
+    users_by_id = {}
+    if customer_ids:
+        active_assignments = db.query(Assignment).filter(
+            Assignment.customer_id.in_(customer_ids), Assignment.active.is_(True)
+        ).all()
+        user_ids = {a.user_id for a in active_assignments}
+        if user_ids:
+            users_by_id = {u.id: u for u in db.query(User).filter(User.id.in_(user_ids)).all()}
+        for assignment in active_assignments:
+            user = users_by_id.get(assignment.user_id)
+            if user:
+                assignments_by_customer.setdefault(assignment.customer_id, []).append(
+                    {'user_id': user.public_id, 'username': user.username}
+                )
+    return [{
+        'id': c.id,
+        'alias': c.alias or c.real_name or ('@' + c.real_username if c.real_username else 'Telegram User'),
+        'telegram_username': c.real_username,
+        'telegram_user_id': c.telegram_peer_id,
+        'name': c.real_name,
+        'phone': c.phone,
+        'account_id': c.account_id,
+        'avatar_available': bool(c.avatar_path),
+        'dialog_folder': c.dialog_folder,
+        'is_archived': c.dialog_folder == 1,
+        'is_saved_messages': bool(c.is_saved_messages),
+        'assigned_to': assignments_by_customer.get(c.id, [])
+    } for c in rows]
 
 @app.get('/api/admin/customers/{cid}/avatar')
 def admin_customer_avatar(cid:int, db:Session=Depends(get_db), actor:User=Depends(admin)):
@@ -999,27 +1017,68 @@ def mark_notifications_read(data: dict, db: Session = Depends(get_db), user: Use
 
 @app.get('/api/inbox')
 def inbox(filter:str='all', db:Session=Depends(get_db), user:User=Depends(current_user)):
-    q=db.query(Customer)
-    if user.role not in ('superadmin','admin'):
-        q=q.filter(Customer.is_saved_messages.is_(False))
-        ids=[a.customer_id for a in db.query(Assignment).filter_by(user_id=user.id,active=True).all()]
-        q=q.filter(Customer.id.in_(ids) if ids else False)
-    result=[]
-    for c in q.all():
-        last=db.query(Message).filter_by(customer_id=c.id).order_by(desc(Message.sent_at)).first()
-        unread=0
-        if user.role not in ('superadmin','admin'):
-            state=db.query(ReadState).filter_by(customer_id=c.id,user_id=user.id).first()
-            last_read=state.last_read_message_id if state else 0
-            unread=db.query(Message).filter(Message.customer_id==c.id,Message.direction=='in',Message.id>last_read).count()
-        if filter=='unread' and unread==0: continue
-        if filter=='unreplied' and (not last or last.direction!='in'): continue
-        business_tag = db.query(Tag).filter_by(customer_id=c.id, key='Business Label', scope='shared').first()
-        result.append({**safe_customer(c,user),'business_label':business_tag.value if business_tag else '',
-                       'last_message':redact(last.body)[:180] if last else '',
-                       'last_message_at':last.sent_at.isoformat() if last else None,
-                       'unread':unread,'account_id':c.account_id})
-    return sorted(result,key=lambda x:x['last_message_at'] or '',reverse=True)
+    q = db.query(Customer)
+    if user.role not in ('superadmin', 'admin'):
+        q = q.filter(Customer.is_saved_messages.is_(False))
+        assigned_ids = [a.customer_id for a in db.query(Assignment.customer_id).filter_by(
+            user_id=user.id, active=True
+        ).all()]
+        q = q.filter(Customer.id.in_(assigned_ids) if assigned_ids else False)
+    customers = q.all()
+    if not customers:
+        return []
+
+    customer_ids = [c.id for c in customers]
+    # Batch fetch latest messages, shared Business Labels and employee read states.
+    latest_times = db.query(
+        Message.customer_id.label('customer_id'),
+        func.max(Message.sent_at).label('last_sent_at')
+    ).filter(Message.customer_id.in_(customer_ids)).group_by(Message.customer_id).subquery()
+    latest_rows = db.query(Message).join(
+        latest_times,
+        and_(Message.customer_id == latest_times.c.customer_id,
+             Message.sent_at == latest_times.c.last_sent_at)
+    ).order_by(Message.sent_at.desc(), Message.id.desc()).all()
+    latest_by_customer = {}
+    for message in latest_rows:
+        latest_by_customer.setdefault(message.customer_id, message)
+
+    business_tags = db.query(Tag).filter(
+        Tag.customer_id.in_(customer_ids), Tag.key == 'Business Label', Tag.scope == 'shared'
+    ).all()
+    business_label_by_customer = {tag.customer_id: tag.value for tag in business_tags}
+
+    unread_by_customer = {}
+    if user.role not in ('superadmin', 'admin'):
+        unread_rows = db.query(
+            Message.customer_id, func.count(Message.id)
+        ).outerjoin(
+            ReadState,
+            and_(ReadState.customer_id == Message.customer_id, ReadState.user_id == user.id)
+        ).filter(
+            Message.customer_id.in_(customer_ids),
+            Message.direction == 'in',
+            Message.id > func.coalesce(ReadState.last_read_message_id, 0)
+        ).group_by(Message.customer_id).all()
+        unread_by_customer = {cid: count for cid, count in unread_rows}
+
+    result = []
+    for customer in customers:
+        last = latest_by_customer.get(customer.id)
+        unread = unread_by_customer.get(customer.id, 0)
+        if filter == 'unread' and unread == 0:
+            continue
+        if filter == 'unreplied' and (not last or last.direction != 'in'):
+            continue
+        result.append({
+            **safe_customer(customer, user),
+            'business_label': business_label_by_customer.get(customer.id, ''),
+            'last_message': redact(last.body)[:180] if last else '',
+            'last_message_at': last.sent_at.isoformat() if last else None,
+            'unread': unread,
+            'account_id': customer.account_id
+        })
+    return sorted(result, key=lambda item: item['last_message_at'] or '', reverse=True)
 
 @app.get('/api/customers/{cid}/messages')
 def messages(cid:int, limit:int=200, before:int|None=None, db:Session=Depends(get_db), user:User=Depends(current_user)):
@@ -1502,14 +1561,18 @@ def _offline_alert_due(offline_since: datetime, now_utc: datetime | None = None,
 
 
 async def employee_offline_alert_loop():
-    """Poll presence and send one Telegram alert per offline episode during Myanmar night hours."""
+    """Poll presence without holding database connections during Telegram HTTP calls."""
     import httpx
     tz = ZoneInfo('Asia/Yangon')
     while True:
         try:
             now_local = datetime.now(tz)
-            in_window = (now_local.hour > 20 or (now_local.hour == 20 and now_local.minute >= 30) or now_local.hour < 9 or (now_local.hour == 9 and now_local.minute < 30))
+            in_window = (now_local.hour > 20 or (now_local.hour == 20 and now_local.minute >= 30)
+                         or now_local.hour < 9 or (now_local.hour == 9 and now_local.minute < 30))
             if in_window:
+                jobs = []
+                bot_token = ''
+                recipients = []
                 with SessionLocal() as db:
                     cfg = db.get(EmployeeAlertConfig, 1)
                     if cfg and cfg.enabled and cfg.bot_token_ciphertext:
@@ -1518,67 +1581,93 @@ async def employee_offline_alert_loop():
                             configured_recipients = json.loads(cfg.chat_ids or '[]')
                             if not isinstance(configured_recipients, list):
                                 configured_recipients = []
-                            recipients = [str(value).strip() for value in configured_recipients if _is_telegram_group_chat_id(str(value))]
+                            recipients = [str(value).strip() for value in configured_recipients
+                                          if _is_telegram_group_chat_id(str(value))]
                             ignored_private_count = len(configured_recipients) - len(recipients)
                             if ignored_private_count:
                                 print(f'offline alert: ignored {ignored_private_count} private/non-group recipient IDs; configure employee identities under attendance settings')
                         except Exception:
                             bot_token, recipients = '', []
-                        if bot_token and recipients:
-                            users = db.query(User).filter(User.active.is_(True), User.role.in_(('employee','chatting','finding','admin'))).all()
-                            for user in users:
-                                sessions = db.query(PresenceSession).filter(PresenceSession.user_id == user.id).order_by(desc(PresenceSession.last_seen)).all()
-                                if not sessions:
-                                    continue
-                                latest = sessions[0]
-                                last_seen = latest.last_seen
-                                if last_seen.tzinfo is None: last_seen = last_seen.replace(tzinfo=timezone.utc)
-                                online = latest.is_active and (datetime.now(timezone.utc) - last_seen).total_seconds() <= 90
-                                break_state = db.get(EmployeeBreakState, user.id)
-                                if break_state and break_state.break_started_at:
-                                    continue
-                                state = db.query(EmployeeAlertState).filter_by(user_id=user.id).first()
-                                if online:
-                                    if state and state.offline_key:
-                                        state.offline_key = ''
-                                        state.notified_at = None
-                                    continue
-                                offline_since = latest.logout_at or last_seen
-                                if offline_since.tzinfo is None: offline_since = offline_since.replace(tzinfo=timezone.utc)
-                                if break_state and break_state.last_return_at:
-                                    returned = break_state.last_return_at
-                                    if returned.tzinfo is None: returned = returned.replace(tzinfo=timezone.utc)
-                                    offline_since = max(offline_since, returned)
-                                check_now_utc = datetime.now(timezone.utc)
-                                elapsed = (check_now_utc - offline_since).total_seconds()
-                                if not _offline_alert_due(offline_since, check_now_utc, 900):
-                                    continue
-                                event_key = offline_since.astimezone(timezone.utc).isoformat(timespec='seconds')
-                                if state and state.offline_key == event_key and state.notified_at:
-                                    continue
-                                since_local = offline_since.astimezone(tz)
-                                duration_minutes = int(elapsed // 60)
-                                duration_text = f'{duration_minutes // 60}h {duration_minutes % 60}m' if duration_minutes >= 60 else f'{duration_minutes} minutes'
-                                message = (f'Employee: {user.username}\nStatus: Offline\nOffline since: {since_local.strftime("%Y-%m-%d %H:%M:%S")} (MMT)\n'
-                                           f'Offline duration: {duration_text}\nAlert time: {now_local.strftime("%Y-%m-%d %H:%M:%S")} (MMT)')
-                                delivered = bool(recipients)
-                                async with httpx.AsyncClient(timeout=4.0) as client:
-                                    for chat_id in recipients:
-                                        try:
-                                            resp = await client.post(f'https://api.telegram.org/bot{bot_token}/sendMessage', json={'chat_id': chat_id, 'text': message})
-                                            resp.raise_for_status()
-                                            if not resp.json().get('ok'): delivered = False
-                                        except Exception as exc:
-                                            delivered = False
-                                            print('employee offline alert group delivery failed:', type(exc).__name__, str(exc)[:240])
-                                if delivered:
+
+                    if bot_token and recipients:
+                        users = db.query(User).filter(
+                            User.active.is_(True), User.role.in_(('employee', 'chatting', 'finding', 'admin'))
+                        ).all()
+                        for user in users:
+                            latest = db.query(PresenceSession).filter(
+                                PresenceSession.user_id == user.id
+                            ).order_by(desc(PresenceSession.last_seen)).first()
+                            if not latest:
+                                continue
+                            last_seen = latest.last_seen
+                            if last_seen.tzinfo is None:
+                                last_seen = last_seen.replace(tzinfo=timezone.utc)
+                            online = latest.is_active and (datetime.now(timezone.utc) - last_seen).total_seconds() <= 90
+                            break_state = db.get(EmployeeBreakState, user.id)
+                            if break_state and break_state.break_started_at:
+                                continue
+                            state = db.query(EmployeeAlertState).filter_by(user_id=user.id).first()
+                            if online:
+                                if state and state.offline_key:
+                                    state.offline_key = ''
+                                    state.notified_at = None
+                                continue
+
+                            offline_since = latest.logout_at or last_seen
+                            if offline_since.tzinfo is None:
+                                offline_since = offline_since.replace(tzinfo=timezone.utc)
+                            if break_state and break_state.last_return_at:
+                                returned = break_state.last_return_at
+                                if returned.tzinfo is None:
+                                    returned = returned.replace(tzinfo=timezone.utc)
+                                offline_since = max(offline_since, returned)
+                            check_now_utc = datetime.now(timezone.utc)
+                            elapsed = (check_now_utc - offline_since).total_seconds()
+                            if not _offline_alert_due(offline_since, check_now_utc, 900):
+                                continue
+                            event_key = offline_since.astimezone(timezone.utc).isoformat(timespec='seconds')
+                            if state and state.offline_key == event_key and state.notified_at:
+                                continue
+                            since_local = offline_since.astimezone(tz)
+                            duration_minutes = int(elapsed // 60)
+                            duration_text = (f'{duration_minutes // 60}h {duration_minutes % 60}m'
+                                             if duration_minutes >= 60 else f'{duration_minutes} minutes')
+                            message = (f'Employee: {user.username}\nStatus: Offline\n'
+                                       f'Offline since: {since_local.strftime("%Y-%m-%d %H:%M:%S")} (MMT)\n'
+                                       f'Offline duration: {duration_text}\n'
+                                       f'Alert time: {now_local.strftime("%Y-%m-%d %H:%M:%S")} (MMT)')
+                            jobs.append((user.id, event_key, message))
+                    db.commit()
+
+                # Telegram API requests run after the SQL session has been closed.
+                if bot_token and recipients and jobs:
+                    async with httpx.AsyncClient(timeout=4.0) as client:
+                        for user_id, event_key, message in jobs:
+                            delivered = True
+                            for chat_id in recipients:
+                                try:
+                                    resp = await client.post(
+                                        f'https://api.telegram.org/bot{bot_token}/sendMessage',
+                                        json={'chat_id': chat_id, 'text': message}
+                                    )
+                                    resp.raise_for_status()
+                                    if not resp.json().get('ok'):
+                                        delivered = False
+                                except Exception as exc:
+                                    delivered = False
+                                    print('employee offline alert group delivery failed:', type(exc).__name__, str(exc)[:240])
+                            if delivered:
+                                with SessionLocal() as db:
+                                    state = db.query(EmployeeAlertState).filter_by(user_id=user_id).first()
                                     if state is None:
-                                        state = EmployeeAlertState(user_id=user.id, offline_key=event_key, notified_at=datetime.now(timezone.utc))
-                                        db.add(state)
+                                        db.add(EmployeeAlertState(
+                                            user_id=user_id, offline_key=event_key,
+                                            notified_at=datetime.now(timezone.utc)
+                                        ))
                                     else:
                                         state.offline_key = event_key
                                         state.notified_at = datetime.now(timezone.utc)
-                            db.commit()
+                                    db.commit()
         except asyncio.CancelledError:
             raise
         except Exception as exc:

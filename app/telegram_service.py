@@ -177,47 +177,88 @@ def attach_handlers(account_id: int, client: TelegramClient):
     async def on_message(event):
         try:
             # Outgoing messages sent by this CRM are persisted by their API routes.
-            # Ignore Telegram's echo event to avoid duplicate rows.
             if event.out:
                 return
             sender = await event.get_sender()
-            if getattr(sender, 'bot', False): return
+            if getattr(sender, 'bot', False):
+                return
+
             peer_id = str(event.chat_id)
-            db = SessionLocal()
-            try:
-                name = ' '.join(filter(None,[getattr(sender,'first_name',''),getattr(sender,'last_name','')])).strip()
-                username = getattr(sender,'username','') or ''
+            name = ' '.join(filter(None, [getattr(sender, 'first_name', ''), getattr(sender, 'last_name', '')])).strip()
+            username = getattr(sender, 'username', '') or ''
+            phone = getattr(sender, 'phone', '') or ''
+            mid = str(event.id)
+
+            # First perform only the customer lookup/upsert. Close the DB session
+            # before any Telegram media/avatar download (network I/O can take a while).
+            with SessionLocal() as db:
                 customer = db.query(Customer).filter_by(account_id=account_id, telegram_peer_id=peer_id).first()
                 if not customer:
-                    customer = Customer(account_id=account_id, telegram_peer_id=peer_id, telegram_access_hash=str(getattr(sender,'access_hash','') or ''), real_username=username, real_name=name, phone=getattr(sender,'phone','') or '', alias=customer_label(sender))
-                    db.add(customer); db.commit(); db.refresh(customer)
-                else:
-                    customer.real_username=username
-                    customer.real_name=name
-                    customer.phone=getattr(sender,'phone','') or ''
-                    customer.telegram_access_hash=str(getattr(sender,'access_hash','') or customer.telegram_access_hash)
-                    customer.alias=customer_label(sender)
-                mid = str(event.id)
-                existing = db.query(Message).filter_by(customer_id=customer.id, telegram_message_id=mid).first()
-                if existing:
-                    # A previous sync may have inserted the text while the volume was full.
-                    # Re-fetch media when the saved path is empty OR points to a missing file.
-                    existing_path = os.path.join(upload_root(), existing.media_path) if existing.media_path else ''
-                    if getattr(event.message, 'media', None) and (not existing_path or not os.path.isfile(existing_path)):
-                        recovered = await save_message_media(account_id, event.message, customer.id)
-                        existing.media_type = message_media_kind(event.message)
-                        existing.media_pending = True
-                        if recovered:
-                            existing.media_path = os.path.relpath(recovered, upload_root())
-                            existing.media_pending = False
-                        db.commit()
-                else:
-                    media_path = await save_message_media(account_id, event.message, customer.id)
-                    db.add(Message(customer_id=customer.id, telegram_message_id=mid, direction='in', body=event.raw_text or '', media_path=os.path.relpath(media_path, upload_root()) if media_path else '', media_type=message_media_kind(event.message), media_pending=bool(getattr(event.message, 'media', None) and not media_path), sent_at=event.date or datetime.now(timezone.utc), sender_label='Customer'))
-                    await save_avatar(account_id, customer, sender)
+                    customer = Customer(
+                        account_id=account_id, telegram_peer_id=peer_id,
+                        telegram_access_hash=str(getattr(sender, 'access_hash', '') or ''),
+                        real_username=username, real_name=name, phone=phone,
+                        alias=customer_label(sender)
+                    )
+                    db.add(customer)
                     db.commit()
-            finally: db.close()
-        except Exception as e: print('telegram incoming handler:', repr(e))
+                    db.refresh(customer)
+                    customer_id = customer.id
+                    avatar_missing = True
+                else:
+                    customer.real_username = username
+                    customer.real_name = name
+                    customer.phone = phone
+                    customer.telegram_access_hash = str(getattr(sender, 'access_hash', '') or customer.telegram_access_hash)
+                    customer.alias = customer_label(sender)
+                    customer_id = customer.id
+                    avatar_missing = not bool(customer.avatar_path)
+                    db.commit()
+
+                existing = db.query(Message).filter_by(customer_id=customer_id, telegram_message_id=mid).first()
+                existing_missing_media = bool(existing and getattr(event.message, 'media', None) and (
+                    not existing.media_path or not os.path.isfile(os.path.join(upload_root(), existing.media_path))
+                ))
+                message_exists = existing is not None
+
+            # All Telegram network operations happen with no SQL connection checked out.
+            media_path = ''
+            if getattr(event.message, 'media', None) and (not message_exists or existing_missing_media):
+                media_path = await save_message_media(account_id, event.message, customer_id)
+
+            avatar_path = ''
+            if avatar_missing:
+                avatar_stub = SimpleNamespace(telegram_peer_id=peer_id, avatar_path='')
+                await save_avatar(account_id, avatar_stub, sender)
+                avatar_path = avatar_stub.avatar_path or ''
+
+            # Persist the message/media metadata in a fresh, short-lived session.
+            with SessionLocal() as db:
+                customer = db.get(Customer, customer_id)
+                if customer and avatar_path:
+                    customer.avatar_path = avatar_path
+                existing = db.query(Message).filter_by(customer_id=customer_id, telegram_message_id=mid).first()
+                if existing:
+                    if existing_missing_media:
+                        existing.media_type = message_media_kind(event.message)
+                        existing.media_pending = not bool(media_path)
+                        if media_path:
+                            existing.media_path = os.path.relpath(media_path, upload_root())
+                else:
+                    db.add(Message(
+                        customer_id=customer_id, telegram_message_id=mid, direction='in',
+                        body=event.raw_text or '',
+                        media_path=os.path.relpath(media_path, upload_root()) if media_path else '',
+                        media_type=message_media_kind(event.message),
+                        media_pending=bool(getattr(event.message, 'media', None) and not media_path),
+                        sent_at=event.date or datetime.now(timezone.utc), sender_label='Customer'
+                    ))
+                try:
+                    db.commit()
+                except IntegrityError:
+                    db.rollback()  # Another sync/handler may have inserted the same Telegram message.
+        except Exception as e:
+            print('telegram incoming handler:', repr(e))
 
 async def collect_dialogs(client: TelegramClient):
     """Collect main and archived folders and explicitly include Saved Messages.
@@ -263,98 +304,103 @@ async def collect_dialogs(client: TelegramClient):
 
 
 async def sync_dialogs(account_id: int, client: TelegramClient, sync_messages: bool = True):
-    """Upsert every dialog first; optionally download message history afterwards.
-
-    When sync_messages=False, this is the fast path used by the admin UI: the
-    complete customer list is committed before background message-history work.
-    """
-    db = SessionLocal()
+    """Index Telegram dialogs using short DB sessions; never hold a connection during Telegram I/O."""
     created = 0
     updated = 0
     eligible = []
-    try:
-        dialogs = await collect_dialogs(client)
-        for dialog in dialogs:
-            entity = dialog.entity
-            if getattr(entity, 'bot', False) or not getattr(entity, 'id', None):
-                continue
-            peer_id = str(dialog.id)
-            is_saved_messages = bool(getattr(dialog, 'is_saved_messages', False))
-            folder_id = 2 if is_saved_messages else int(getattr(dialog, 'folder_id', 0) or 0)
-            name = 'Saved Messages' if is_saved_messages else ' '.join(filter(None, [
-                getattr(entity, 'first_name', ''), getattr(entity, 'last_name', '')
-            ])).strip()
-            username = getattr(entity, 'username', '') or ''
-            customer = db.query(Customer).filter_by(
-                account_id=account_id, telegram_peer_id=peer_id
-            ).first()
+    dialogs = await collect_dialogs(client)
+
+    for dialog in dialogs:
+        entity = dialog.entity
+        if getattr(entity, 'bot', False) or not getattr(entity, 'id', None):
+            continue
+        peer_id = str(dialog.id)
+        is_saved_messages = bool(getattr(dialog, 'is_saved_messages', False))
+        folder_id = 2 if is_saved_messages else int(getattr(dialog, 'folder_id', 0) or 0)
+        name = 'Saved Messages' if is_saved_messages else ' '.join(filter(None, [
+            getattr(entity, 'first_name', ''), getattr(entity, 'last_name', '')
+        ])).strip()
+        username = getattr(entity, 'username', '') or ''
+
+        with SessionLocal() as db:
+            customer = db.query(Customer).filter_by(account_id=account_id, telegram_peer_id=peer_id).first()
             if not customer:
                 customer = Customer(
-                    account_id=account_id,
-                    telegram_peer_id=peer_id,
+                    account_id=account_id, telegram_peer_id=peer_id,
                     telegram_access_hash=str(getattr(entity, 'access_hash', '') or ''),
-                    real_username=username,
-                    real_name=name,
+                    real_username=username, real_name=name,
                     phone=getattr(entity, 'phone', '') or '',
                     alias='Saved Messages' if is_saved_messages else customer_label(entity),
-                    dialog_folder=folder_id,
-                    is_saved_messages=is_saved_messages
+                    dialog_folder=folder_id, is_saved_messages=is_saved_messages
                 )
                 db.add(customer)
-                db.flush()
-                created += 1
+                try:
+                    db.commit()
+                    db.refresh(customer)
+                    created += 1
+                except IntegrityError:
+                    db.rollback()
+                    customer = db.query(Customer).filter_by(account_id=account_id, telegram_peer_id=peer_id).first()
             else:
                 customer.real_username = username
                 customer.real_name = name
                 customer.phone = getattr(entity, 'phone', '') or ''
-                customer.telegram_access_hash = str(
-                    getattr(entity, 'access_hash', '') or customer.telegram_access_hash
-                )
+                customer.telegram_access_hash = str(getattr(entity, 'access_hash', '') or customer.telegram_access_hash)
                 customer.alias = 'Saved Messages' if is_saved_messages else customer_label(entity)
                 customer.dialog_folder = folder_id
                 customer.is_saved_messages = is_saved_messages
+                db.commit()
                 updated += 1
-            try:
-                await save_avatar(account_id, customer, entity)
-            except Exception as exc:
-                print('telegram avatar sync:', repr(exc))
-            eligible.append((entity, customer.id))
-        db.commit()
-        result = {
-            'account_id': account_id,
-            'dialog_count': len(dialogs),
-            'customer_count': len(eligible),
-            'created_count': created,
-            'updated_count': updated,
-            'archived_count': db.query(Customer).filter_by(account_id=account_id, dialog_folder=1).count(),
-            'saved_messages_included': db.query(Customer).filter_by(account_id=account_id, is_saved_messages=True).count() > 0,
-            'messages_synced': 0,
-            'history_pending': not sync_messages
-        }
-    except Exception:
-        db.rollback()
-        raise
-    finally:
-        db.close()
+            customer_id = customer.id if customer else None
+            avatar_missing = not bool(customer and customer.avatar_path)
 
+        if customer_id is None:
+            continue
+        eligible.append((entity, customer_id))
+
+        # Download profile photo outside the DB session and then save only its path.
+        if avatar_missing:
+            avatar_stub = SimpleNamespace(telegram_peer_id=peer_id, avatar_path='')
+            await save_avatar(account_id, avatar_stub, entity)
+            if avatar_stub.avatar_path:
+                with SessionLocal() as db:
+                    row = db.get(Customer, customer_id)
+                    if row and not row.avatar_path:
+                        row.avatar_path = avatar_stub.avatar_path
+                        db.commit()
+
+    with SessionLocal() as db:
+        archived_count = db.query(Customer).filter_by(account_id=account_id, dialog_folder=1).count()
+        saved_messages_included = db.query(Customer).filter_by(account_id=account_id, is_saved_messages=True).count() > 0
+
+    result = {
+        'account_id': account_id,
+        'dialog_count': len(dialogs),
+        'customer_count': len(eligible),
+        'created_count': created,
+        'updated_count': updated,
+        'archived_count': archived_count,
+        'saved_messages_included': saved_messages_included,
+        'messages_synced': 0,
+        'history_pending': not sync_messages
+    }
     if sync_messages:
         history = await sync_dialog_messages(account_id, client, eligible)
         result.update(history)
         result['history_pending'] = False
     return result
 
-
 async def sync_dialog_messages(account_id: int, client: TelegramClient, dialog_rows=None):
-    """Import recent/full available history for already indexed customer dialogs."""
-    db = SessionLocal()
+    """Import Telegram history without holding a DB connection during network I/O."""
     synced = 0
     media_recovered = 0
     media_failed = 0
     errors = []
-    try:
-        if dialog_rows is None:
-            dialogs = await collect_dialogs(client)
-            dialog_rows = []
+
+    if dialog_rows is None:
+        dialogs = await collect_dialogs(client)
+        dialog_rows = []
+        with SessionLocal() as db:
             for dialog in dialogs:
                 entity = dialog.entity
                 if getattr(entity, 'bot', False) or not getattr(entity, 'id', None):
@@ -364,39 +410,46 @@ async def sync_dialog_messages(account_id: int, client: TelegramClient, dialog_r
                 ).first()
                 if customer:
                     dialog_rows.append((entity, customer.id))
-        for entity, customer_id in dialog_rows:
-            try:
-                # Import all message history exposed by Telegram for this dialog.
-                # This runs in the background after the customer index is committed,
-                # so the admin can assign customers without waiting for media/history.
-                async for msg in client.iter_messages(entity, limit=None, reverse=True):
-                    if not msg or not msg.id:
-                        continue
+
+    for entity, customer_id in dialog_rows:
+        try:
+            # Telethon iteration and media downloads occur without an open SQL session.
+            async for msg in client.iter_messages(entity, limit=None, reverse=True):
+                if not msg or not msg.id:
+                    continue
+                message_id = str(msg.id)
+                with SessionLocal() as db:
                     existing = db.query(Message).filter_by(
-                        customer_id=customer_id,
-                        telegram_message_id=str(msg.id)
+                        customer_id=customer_id, telegram_message_id=message_id
                     ).first()
-                    # Older sync runs may have stored the text but failed to save
-                    # the attachment (for example when the Railway volume was full).
+                    existing_id = existing.id if existing else None
+                    existing_path = existing.media_path if existing else ''
+
+                existing_file = os.path.join(upload_root(), existing_path) if existing_path else ''
+                needs_media = bool(getattr(msg, 'media', None) and (
+                    not existing_id or not existing_file or not os.path.isfile(existing_file)
+                ))
+                media_path = await save_message_media(account_id, msg, customer_id) if needs_media else ''
+
+                with SessionLocal() as db:
+                    existing = db.query(Message).filter_by(
+                        customer_id=customer_id, telegram_message_id=message_id
+                    ).first()
                     if existing:
-                        existing_path = os.path.join(upload_root(), existing.media_path) if existing.media_path else ''
-                        if getattr(msg, 'media', None) and (not existing_path or not os.path.isfile(existing_path)):
+                        if needs_media:
                             existing.media_type = message_media_kind(msg)
-                            existing.media_pending = True
-                            media_path = await save_message_media(account_id, msg, customer_id)
+                            existing.media_pending = not bool(media_path)
                             if media_path:
                                 existing.media_path = os.path.relpath(media_path, upload_root())
-                                existing.media_pending = False
-                                db.commit()
                                 media_recovered += 1
                             else:
-                                db.commit()
                                 media_failed += 1
+                            db.commit()
                         continue
-                    media_path = await save_message_media(account_id, msg, customer_id)
+
                     db.add(Message(
                         customer_id=customer_id,
-                        telegram_message_id=str(msg.id),
+                        telegram_message_id=message_id,
                         direction='out' if msg.out else 'in',
                         body=msg.message or '',
                         media_path=os.path.relpath(media_path, upload_root()) if media_path else '',
@@ -414,30 +467,50 @@ async def sync_dialog_messages(account_id: int, client: TelegramClient, dialog_r
                             media_failed += 1
                     except IntegrityError:
                         db.rollback()
-            except Exception as exc:
-                db.rollback()
-                errors.append(f'{getattr(entity, "id", "unknown")}: {exc}')
-                print('telegram history sync:', repr(exc))
-        return {'messages_synced': synced, 'media_recovered': media_recovered, 'media_failed': media_failed, 'history_errors': errors}
-    finally:
-        db.close()
+        except Exception as exc:
+            errors.append(f'{getattr(entity, "id", "unknown")}: {exc}')
+            print('telegram history sync:', repr(exc))
+
+    return {'messages_synced': synced, 'media_recovered': media_recovered,
+            'media_failed': media_failed, 'history_errors': errors}
 
 async def restore_clients():
-    db = SessionLocal()
-    rows = db.query(TgAccount).filter(TgAccount.status == 'connected').all()
-    for row in rows:
+    # Snapshot encrypted sessions, then release the DB connection before Telegram I/O.
+    with SessionLocal() as db:
+        rows = [(row.id, row.session_ciphertext) for row in
+                db.query(TgAccount).filter(TgAccount.status == 'connected').all()]
+
+    for account_id, ciphertext in rows:
+        client = None
         try:
-            client = TelegramClient(StringSession(decrypt_session(row.session_ciphertext)), int(settings.telegram_api_id), settings.telegram_api_hash)
+            client = TelegramClient(
+                StringSession(decrypt_session(ciphertext)),
+                int(settings.telegram_api_id), settings.telegram_api_hash
+            )
             await client.connect()
-            if not await client.is_user_authorized(): row.status = 'reauthorization_required'; db.commit(); await client.disconnect(); continue
-            _clients[row.id] = client
-            attach_handlers(row.id, client)
-            # Restore the authorized Telegram connection and incoming-message
-            # handler only. Never launch bulk dialog/avatar/history downloads at
-            # every web-service startup; those are an explicit admin action.
+            authorized = await client.is_user_authorized()
+            if not authorized:
+                await client.disconnect()
+                with SessionLocal() as db:
+                    row = db.get(TgAccount, account_id)
+                    if row:
+                        row.status = 'reauthorization_required'
+                        db.commit()
+                continue
+            _clients[account_id] = client
+            attach_handlers(account_id, client)
         except Exception as e:
-            row.status = 'error'; db.commit(); print('restore account:', row.id, repr(e))
-    db.close()
+            if client:
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
+            with SessionLocal() as db:
+                row = db.get(TgAccount, account_id)
+                if row:
+                    row.status = 'error'
+                    db.commit()
+            print('restore account:', account_id, repr(e))
 
 async def send_message(account_id: int, customer: Customer, text: str):
     client = _clients.get(account_id)

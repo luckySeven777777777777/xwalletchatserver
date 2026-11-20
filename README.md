@@ -1,4 +1,4 @@
-## Current release: v7.7.5
+## Current release: v7.8.1
 
 See `PATCH_NOTES_v7.7.1.md` for fast admin action behavior and Telegram employee offline notifications.
 
