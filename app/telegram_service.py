@@ -159,7 +159,10 @@ async def finish_login(code_hash: str, code: str = '', password: str | None = No
         _clients[account.id] = client
         _pending.pop(code_hash, None)
         attach_handlers(account.id, client)
-        asyncio.create_task(sync_dialogs(account.id, client))
+        # Do not launch a full dialog/avatar/history sync automatically on login.
+        # Large accounts can trigger many Telegram GetFileRequest downloads and
+        # keep background tasks alive during Railway restarts. Admins can run
+        # an explicit sync from the dashboard when they choose.
         return {'account_id': account.id, 'label': account.label, 'phone_masked': account.phone_masked}
     except Exception:
         db.rollback()
@@ -429,7 +432,9 @@ async def restore_clients():
             if not await client.is_user_authorized(): row.status = 'reauthorization_required'; db.commit(); await client.disconnect(); continue
             _clients[row.id] = client
             attach_handlers(row.id, client)
-            asyncio.create_task(sync_dialogs(row.id, client))
+            # Restore the authorized Telegram connection and incoming-message
+            # handler only. Never launch bulk dialog/avatar/history downloads at
+            # every web-service startup; those are an explicit admin action.
         except Exception as e:
             row.status = 'error'; db.commit(); print('restore account:', row.id, repr(e))
     db.close()
@@ -465,3 +470,26 @@ async def forward_message(account_id: int, source_customer: Customer, target_cus
             raise RuntimeError('Telegram did not return a forwarded message.')
         return forwarded[0]
     return forwarded
+
+
+
+async def close_clients():
+    """Gracefully disconnect restored Telegram user clients on application shutdown."""
+    clients = list(_clients.values())
+    _clients.clear()
+    for client in clients:
+        try:
+            if client.is_connected():
+                await client.disconnect()
+        except Exception as exc:
+            print('telegram client shutdown:', repr(exc))
+    # Close any unfinished login challenges as well.
+    pending = list(_pending.values())
+    _pending.clear()
+    for item in pending:
+        client = item.get('client')
+        try:
+            if client and client.is_connected():
+                await client.disconnect()
+        except Exception as exc:
+            print('telegram pending login shutdown:', repr(exc))

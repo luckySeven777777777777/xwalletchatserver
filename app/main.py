@@ -307,6 +307,9 @@ async def shutdown_employee_alerts():
                 await task
             except asyncio.CancelledError:
                 pass
+    # Close Telethon connections cleanly so its internal recv/send tasks are
+    # not abandoned when Railway stops or replaces the web container.
+    await tg.close_clients()
 
 
 @app.get('/')
