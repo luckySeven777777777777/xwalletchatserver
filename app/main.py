@@ -868,21 +868,32 @@ async def admin_sync_telegram_account(account_id: int, db: Session = Depends(get
             'message': 'Telegram sync was queued. Existing customers remain available while new chats and history are imported in the background.'}
 
 @app.get('/api/admin/telegram/accounts/{account_id}/profile')
-async def admin_telegram_account_profile(account_id: int, db: Session = Depends(get_db), actor: User = Depends(admin)):
-    if actor.role != 'superadmin' and not ({'telegram.connect','telegram.sync'} & set(user_permissions(actor))): raise HTTPException(403, 'Missing Telegram account permission')
-    account = db.get(TgAccount, account_id)
-    if not account or account.status == 'deleted':
-        raise HTTPException(404, 'Telegram account not found.')
+async def admin_telegram_account_profile(account_id: int, actor: User = Depends(admin)):
+    # IMPORTANT: never keep a SQLAlchemy connection checked out while awaiting
+    # Telegram network operations. A DB session held across get_me()/photo
+    # downloads can exhaust Railway's entire QueuePool under concurrent requests.
+    if actor.role != 'superadmin' and not ({'telegram.connect','telegram.sync'} & set(user_permissions(actor))):
+        raise HTTPException(403, 'Missing Telegram account permission')
+    with SessionLocal() as db:
+        account = db.get(TgAccount, account_id)
+        if not account or account.status == 'deleted':
+            raise HTTPException(404, 'Telegram account not found.')
+        saved_label = account.label or ''
+
     client = tg._clients.get(account_id)
     if not client or not client.is_connected():
         raise HTTPException(409, 'Telegram account is not connected.')
+
     me = await client.get_me()
     name = ' '.join(filter(None, [getattr(me, 'first_name', ''), getattr(me, 'last_name', '')])).strip()
-    if name and account.label != name[:120]:
-        account.label = name[:120]
-        db.commit()
+    if name and saved_label != name[:120]:
+        with SessionLocal() as db:
+            account = db.get(TgAccount, account_id)
+            if account and account.status != 'deleted':
+                account.label = name[:120]
+                db.commit()
 
-    # Avoid filesystem writes: Railway logs showed OSError(28), no space left on device.
+    # Avoid filesystem writes: keep the avatar in memory.
     avatar_available = account_id in _TELEGRAM_ACCOUNT_AVATAR_CACHE
     try:
         photo_bytes = await client.download_profile_photo(me, file=bytes)
@@ -895,7 +906,7 @@ async def admin_telegram_account_profile(account_id: int, db: Session = Depends(
 
     return {
         'id': getattr(me, 'id', None),
-        'name': name or account.label or str(account_id),
+        'name': name or saved_label or str(account_id),
         'username': getattr(me, 'username', '') or '',
         'phone': getattr(me, 'phone', '') or '',
         'avatar_available': avatar_available,

@@ -17,3 +17,9 @@
 - Keep the existing PostgreSQL `DATABASE_URL`, Railway Volume, `JWT_SECRET`, `SESSION_ENCRYPTION_KEY`, Telegram API credentials, and Bot A shared secret unchanged.
 - Do not deploy this package to the separate Bot A worker service.
 - After deployment, verify `/api/health/ready`, `/api/inbox?filter=all`, and `/api/admin/customers?account_id=<connected-account-id>`.
+
+
+## v7.8.1 follow-up finding from production logs
+- The Telegram account profile endpoint previously retained its request-scoped SQLAlchemy session while awaiting Telegram `get_me()` and profile-photo download calls.
+- Under concurrent traffic this could keep a pool connection checked out during network waits and contribute to `QueuePool limit ... reached` errors.
+- The profile endpoint now snapshots the account label in a short-lived session, closes it before Telegram I/O, and opens a new short-lived session only if the label must be updated.
