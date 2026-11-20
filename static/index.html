@@ -295,7 +295,12 @@ async function init(){try{
  }catch(e){$('loginerr').textContent=e.message;sessionStorage.removeItem(sessionKey);token=null;}}
 async function logout(){try{if(token)await api('/presence/logout',{method:'POST'})}catch(e){}if(heartbeatTimer)clearInterval(heartbeatTimer);sessionStorage.removeItem(sessionKey);sessionStorage.removeItem(sessionKey+':presence');token=null;location.reload()}
 function show(id){const isAdmin=me&&['superadmin','admin'].includes(me.role);const isFinding=me&&me.role==='finding';if(id==='admin'&&!isAdmin)id='inbox';if(id==='channels'&&!isAdmin&&!isFinding)id='inbox';['inbox','admin','channels'].forEach(x=>$(x).classList.toggle('hidden',x!==id));if(id==='admin')loadAdmin();if(id==='inbox')renderInbox()}
-async function renderInbox(){try{let f=$('filter').value;const allIncoming=await api('/inbox?filter=all');if(inboxInitialized){const added=allIncoming.filter(c=>!seenCustomerIds.has(Number(c.id)));/* Persistent assignment notifications are delivered by /api/notifications. */}seenCustomerIds=new Set(allIncoming.map(c=>Number(c.id)));inboxInitialized=true;const incoming=f==='all'?allIncoming:await api('/inbox?filter='+f);customers=incoming;let q=$('search').value.toLowerCase();customers=customers.filter(c=>(c.alias+' '+c.id).toLowerCase().includes(q));$('inboxlist').innerHTML=customers.map(c=>`<div class="item" onclick="openCustomer(${c.id})"><div style="display:flex;align-items:center;justify-content:space-between;gap:8px"><b>${esc(c.alias)}</b>${c.business_label?`<span class="business-label-badge">${esc(c.business_label)}</span>`:''}</div><div class="muted">${esc(c.last_message||'')}</div><small class="muted">${c.unread?c.unread+' 未读':''}</small></div>`).join('')||'<p class="muted">暂无已分配客户</p>'}catch(e){showModal('操作失败',e.message,true)}}
+let inboxRefreshInFlight=null;
+async function renderInbox(){
+ if(inboxRefreshInFlight)return inboxRefreshInFlight;
+ inboxRefreshInFlight=(async()=>{try{let f=$('filter').value;const allIncoming=await api('/inbox?filter=all');if(inboxInitialized){const added=allIncoming.filter(c=>!seenCustomerIds.has(Number(c.id)));/* Persistent assignment notifications are delivered by /api/notifications. */}seenCustomerIds=new Set(allIncoming.map(c=>Number(c.id)));inboxInitialized=true;const incoming=f==='all'?allIncoming:await api('/inbox?filter='+f);customers=incoming;let q=$('search').value.toLowerCase();customers=customers.filter(c=>(c.alias+' '+c.id).toLowerCase().includes(q));$('inboxlist').innerHTML=customers.map(c=>`<div class="item" onclick="openCustomer(${c.id})"><div style="display:flex;align-items:center;justify-content:space-between;gap:8px"><b>${esc(c.alias)}</b>${c.business_label?`<span class="business-label-badge">${esc(c.business_label)}</span>`:''}</div><div class="muted">${esc(c.last_message||'')}</div><small class="muted">${c.unread?c.unread+' 未读':''}</small></div>`).join('')||'<p class="muted">暂无已分配客户</p>'}catch(e){if(!/HTTP 502|HTTP 503|HTTP 504/.test(e.message||''))showModal('操作失败',e.message,true);console.warn('Inbox refresh failed:',e.message)}finally{inboxRefreshInFlight=null;}})();
+ return inboxRefreshInFlight;
+}
 async function renderMessageList(ms){
  mediaObjectUrls.forEach(u=>URL.revokeObjectURL(u));mediaObjectUrls=[];
  $('messages').innerHTML=ms.map(m=>`<div class="bubble ${m.direction==='out'?'out':''}"><div>${esc(m.text||'')}</div><div id="media-${m.id}"></div><small class="muted">${formatMyanmar(m.sent_at)} · ${esc(m.sender||'')}</small><div class="chat-tools"><button class="secondary" onclick="forwardMessage(${m.id})">↗ Forward</button></div></div>`).join('');
@@ -460,12 +465,14 @@ async function loadAdmin(){
  }
  if(data['Telegram 连接账号']){
   const jump=$('telegram-account-jump');if(jump){const oldJump=jump.value;jump.innerHTML='<option value="">快速选择 Telegram 账号</option>'+data['Telegram 连接账号'].filter(a=>!a.deleted).map(a=>`<option value="${a.id}">${esc(a.label)} · #${a.id}</option>`).join('');if(oldJump)jump.value=oldJump;}
-  $('accounts').innerHTML=data['Telegram 连接账号'].filter(a=>!a.deleted).map(a=>`<div class="account-card" data-owner-id="${a.assigned_user_id||''}" id="tg-account-card-${a.id}"><b>Telegram Account #${a.id}</b><div class="meta">Assigned employee: <b>${esc(a.assigned_username||'Unassigned')}</b></div><div class="telegram-account-profile"><img id="tg-account-avatar-${a.id}" src="/static/logos/telegram.svg" alt="Telegram account avatar"><div class="profile-lines"><b id="tg-account-name-${a.id}">${esc(a.label)}</b><div class="meta" id="tg-account-details-${a.id}">Phone: ${esc(a.phone_masked)} · Loading Telegram profile…</div></div></div><div class="meta">Status: <span class="account-status ${a.status==='connected'?'':'offline'}">${esc(a.status)}</span><br>Synced customers: ${a.customer_count??0}<br>Connected: ${formatMyanmar(a.created_at)}</div><div class="account-actions">${hasPermission('telegram.sync')?`<button onclick="syncTelegramAccount(${a.id},this)" ${a.status==='connected'?'':'disabled'}>Sync all chats</button>`:''}${['telegram.connect','telegram.sync'].some(hasPermission)?`<button class="secondary" onclick="loadTelegramAccountProfile(${a.id})" ${a.status==='connected'?'':'disabled'}>Refresh profile</button>`:''}${hasPermission('telegram.connect')?`<button class="secondary" onclick="disconnectTelegramAccount(${a.id},'${esc(a.label)}')">取消连接</button>`:''}${me?.role==='superadmin'?`<button class="danger" onclick="deleteTelegramAccount(${a.id},'${esc(a.label)}')">永久删除账号</button>`:''}</div></div>`).join('')||'<p class="muted">No active Telegram personal accounts. Archived customer history remains available below.</p>';
+  $('accounts').innerHTML=data['Telegram 连接账号'].filter(a=>!a.deleted).map(a=>`<div class="account-card" data-owner-id="${a.assigned_user_id||''}" id="tg-account-card-${a.id}"><b>Telegram Account #${a.id}</b><div class="meta">Assigned employee: <b>${esc(a.assigned_username||'Unassigned')}</b></div><div class="telegram-account-profile"><img id="tg-account-avatar-${a.id}" src="/static/logos/telegram.svg" alt="Telegram account avatar"><div class="profile-lines"><b id="tg-account-name-${a.id}">${esc(a.label)}</b><div class="meta" id="tg-account-details-${a.id}">Phone: ${esc(a.phone_masked)} · Loading Telegram profile…</div></div></div><div class="meta">Status: <span class="account-status ${a.status==='connected'?'':'offline'}">${esc(a.status)}</span><br>Synced customers: <span id="tg-account-customer-count-${a.id}">${a.customer_count??0}</span><br>Connected: ${formatMyanmar(a.created_at)}</div><div class="account-actions">${hasPermission('telegram.sync')?`<button onclick="syncTelegramAccount(${a.id},this)" ${a.status==='connected'?'':'disabled'}>Sync all chats</button>`:''}${['telegram.connect','telegram.sync'].some(hasPermission)?`<button class="secondary" onclick="loadTelegramAccountProfile(${a.id},true)" ${a.status==='connected'?'':'disabled'}>Refresh profile</button>`:''}${hasPermission('telegram.connect')?`<button class="secondary" onclick="disconnectTelegramAccount(${a.id},'${esc(a.label)}')">取消连接</button>`:''}${me?.role==='superadmin'?`<button class="danger" onclick="deleteTelegramAccount(${a.id},'${esc(a.label)}')">永久删除账号</button>`:''}</div></div>`).join('')||'<p class="muted">No active Telegram personal accounts. Archived customer history remains available below.</p>';
   filterTelegramAccountsByOwner($('telegram-owner-filter')?.value||'');
   const selectedAccount=data['Telegram 连接账号'].find(a=>String(a.id)===String($('telegram-account-jump')?.value||''));
   if(selectedAccount&&$('telegram-owner-select'))$('telegram-owner-select').value=selectedAccount.assigned_user_id?String(selectedAccount.assigned_user_id):'';
   if(selectedAccount&&$('customer-employee-filter'))$('customer-employee-filter').value=selectedAccount.assigned_user_id?String(selectedAccount.assigned_user_id):'';
-  for(const a of data['Telegram 连接账号'])if(!a.deleted&&a.status==='connected')loadTelegramAccountProfile(a.id);
+  // Do not fire 20–30 Telegram profile/photo requests simultaneously.
+  loadTelegramAccountProfiles(data['Telegram 连接账号']).catch(err=>console.warn('Telegram profile queue failed:',err));
+  watchTelegramStartupSync().catch(err=>console.warn('Telegram initial sync monitor failed:',err));
  }
  if(errors.length){
   const visibleErrors=errors.filter(message=>!/HTTP 403.*Missing administrator permission/i.test(message));
@@ -601,19 +608,70 @@ async function syncSelectedTelegramAccount(button){
  if(!id)return showModal('请选择账号','请先选择一个 Telegram 账号。',true);
  await syncTelegramAccount(id,button);
 }
-async function loadTelegramAccountProfile(id){
- try{
-  const p=await api('/admin/telegram/accounts/'+id+'/profile');
-  const name=p.name||'Telegram Account';
-  $('tg-account-name-'+id).textContent=name;
-  $('tg-account-details-'+id).innerHTML=`Username: ${p.username?'@'+esc(p.username):'--'}<br>Phone: ${esc(p.phone||'--')}<br>Telegram ID: ${esc(p.id||'--')}`;
-  if(p.avatar_available){
-   const r=await fetch('/api/admin/telegram/accounts/'+id+'/avatar?v='+Date.now(),{headers:{Authorization:'Bearer '+token},cache:'no-store'});
-   if(r.ok){const blob=await r.blob();const url=URL.createObjectURL(blob);$('tg-account-avatar-'+id).src=url;}
+let telegramSyncWatchPromise=null;
+async function watchTelegramStartupSync(){
+ if(telegramSyncWatchPromise)return telegramSyncWatchPromise;
+ telegramSyncWatchPromise=(async()=>{
+  for(let attempt=0;attempt<180;attempt++){
+   try{
+    const state=await api('/admin/telegram/sync-status');
+    const busy=(state.accounts||[]).some(a=>['queued','running'].includes(a.status));
+    if(!state.restore_running&&!busy){
+     const accounts=await api('/admin/telegram/accounts');
+     accounts.forEach(a=>{const node=$('tg-account-customer-count-'+a.id);if(node)node.textContent=a.customer_count??0;});
+     await loadAdminCustomers();
+     return;
+    }
+   }catch(e){console.warn('Telegram sync status:',e.message)}
+   await new Promise(resolve=>setTimeout(resolve,5000));
   }
- }catch(e){
-  const el=$('tg-account-details-'+id);if(el)el.textContent='Telegram profile unavailable: '+e.message;
- }
+ })();
+ try{return await telegramSyncWatchPromise;}finally{telegramSyncWatchPromise=null;}
+}
+
+const telegramProfileRequests = new Map();
+async function loadTelegramAccountProfile(id, force=false){
+ const key=String(id);
+ if(!force && telegramProfileRequests.has(key))return telegramProfileRequests.get(key);
+ const task=(async()=>{
+  let lastError=null;
+  for(let attempt=0;attempt<9;attempt++){
+   try{
+    const p=await api('/admin/telegram/accounts/'+id+'/profile'+(force?'?refresh=true':''));
+    const name=p.name||'Telegram Account',nameEl=$('tg-account-name-'+id),detailsEl=$('tg-account-details-'+id);
+    if(nameEl)nameEl.textContent=name;
+    if(detailsEl)detailsEl.innerHTML=`Username: ${p.username?'@'+esc(p.username):'--'}<br>Phone: ${esc(p.phone||'--')}<br>Telegram ID: ${esc(p.id||'--')}`;
+    if(p.avatar_available){
+     const r=await fetch('/api/admin/telegram/accounts/'+id+'/avatar?v='+Date.now(),{headers:{Authorization:'Bearer '+token},cache:'no-store'});
+     if(r.ok){const blob=await r.blob(),url=URL.createObjectURL(blob),avatar=$('tg-account-avatar-'+id);if(avatar){if(avatar.dataset.objectUrl)URL.revokeObjectURL(avatar.dataset.objectUrl);avatar.dataset.objectUrl=url;avatar.src=url;}}
+    }
+    if(window.xwalletProfileRetry)delete window.xwalletProfileRetry[key];
+    return p;
+   }catch(e){
+    lastError=e;
+    const transient=/HTTP (409|429|500|502|503|504)/.test(e.message||'');
+    if(!transient||attempt===8)break;
+    await new Promise(resolve=>setTimeout(resolve,Math.min(1000*(attempt+1),5000)));
+   }
+  }
+  const el=$('tg-account-details-'+id);if(el)el.textContent='Telegram profile unavailable: '+(lastError?.message||'Unknown error');
+  return null;
+ })();
+ telegramProfileRequests.set(key,task);
+ try{return await task;}finally{if(telegramProfileRequests.get(key)===task)telegramProfileRequests.delete(key);}
+}
+async function loadTelegramAccountProfiles(accounts){
+ const ids=(accounts||[]).filter(a=>!a.deleted&&a.status==='connected').map(a=>a.id);
+ let cursor=0;
+ const worker=async()=>{
+  while(cursor<ids.length){
+   const id=ids[cursor++];
+   await loadTelegramAccountProfile(id);
+   // Spread profile lookups over time; the backend also enforces a hard limit.
+   await new Promise(resolve=>setTimeout(resolve,180));
+  }
+ };
+ await Promise.all(Array.from({length:Math.min(3,ids.length)},()=>worker()));
 }
 async function syncTelegramAccount(id,button){
  const oldText=button?.textContent;
@@ -700,8 +758,10 @@ async function open2FASettings(){
  }catch(e){showModal('2FA 设置失败',e.message,true)}
 }
 function startPresenceHeartbeat(){if(heartbeatTimer)clearInterval(heartbeatTimer);const beat=()=>{if(token)api('/presence/heartbeat',{method:'POST'}).catch(()=>{})};beat();heartbeatTimer=setInterval(beat,20000)}
+let assignmentPollInFlight=false;
 async function pollAssignmentNotifications(){
- if(!token||!me||['superadmin','admin'].includes(me.role))return;
+ if(assignmentPollInFlight||!token||!me||['superadmin','admin'].includes(me.role))return;
+ assignmentPollInFlight=true;
  try{
   const rows=await api('/notifications');if(!rows.length)return;
   rows.sort((a,b)=>a.id-b.id);rows.forEach(n=>{notifications.unshift({id:n.id,title:n.title||'New customer assigned',body:n.body,time:n.created_at,customer_id:n.customer_id});});notifications=notifications.slice(0,30);
@@ -709,7 +769,7 @@ async function pollAssignmentNotifications(){
   $('notification-list').innerHTML=notifications.map(n=>`<div class="notification-row"><b>${esc(n.title)}</b><br>${esc(n.body||n.title)} · ${formatMyanmar(n.time)}</div>`).join('');
   const latest=rows[rows.length-1];if(soundEnabled)speakAssignmentAlert();
   try{await api('/notifications/read',{method:'POST',body:JSON.stringify({ids:rows.map(n=>n.id)})})}catch(e){console.warn('Could not mark notifications read:',e)}
- }catch(e){console.warn('Assignment notification poll failed:',e)}
+ }catch(e){console.warn('Assignment notification poll failed:',e)}finally{assignmentPollInFlight=false}
 }
 function speakAssignmentAlert(){
  try{

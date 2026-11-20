@@ -25,10 +25,13 @@ if url.startswith("sqlite"):
 else:
     engine_options = {
         "pool_pre_ping": True,
-        "pool_size": max(2, int(os.getenv("DB_POOL_SIZE", "8"))),
-        "max_overflow": max(0, int(os.getenv("DB_MAX_OVERFLOW", "12"))),
-        "pool_timeout": max(5, int(os.getenv("DB_POOL_TIMEOUT", "20"))),
-        "pool_recycle": max(60, int(os.getenv("DB_POOL_RECYCLE", "1800"))),
+        # Railway Hobby should not have every web request open its own DB socket.
+        # Keep the default footprint modest and let short transactions queue safely.
+        # Tune only after checking the actual PostgreSQL connection limit.
+        "pool_size": max(2, int(os.getenv("DB_POOL_SIZE", "5"))),
+        "max_overflow": max(0, int(os.getenv("DB_MAX_OVERFLOW", "5"))),
+        "pool_timeout": max(5, int(os.getenv("DB_POOL_TIMEOUT", "15"))),
+        "pool_recycle": max(60, int(os.getenv("DB_POOL_RECYCLE", "1200"))),
         "pool_use_lifo": True,
         "connect_args": {"connect_timeout": 10, "application_name": "xwallet-chat-server"},
     }

@@ -46,6 +46,14 @@ def ensure_telegram_owner_column():
 
 ensure_telegram_owner_column()
 
+# Composite indexes used by the 50-seat inbox/presence workload. These are additive
+# and idempotent; they do not alter or delete existing records.
+with engine.begin() as conn:
+    conn.execute(text("CREATE INDEX IF NOT EXISTS ix_messages_customer_sent_id ON messages (customer_id, sent_at DESC, id DESC)"))
+    conn.execute(text("CREATE INDEX IF NOT EXISTS ix_assignments_user_active_customer ON assignments (user_id, active, customer_id)"))
+    conn.execute(text("CREATE INDEX IF NOT EXISTS ix_presence_user_last_seen ON presence_sessions (user_id, last_seen DESC)"))
+    conn.execute(text("CREATE INDEX IF NOT EXISTS ix_notifications_user_read_id ON inbox_notifications (user_id, is_read, id)"))
+
 # Fine-grained delegated-admin permissions. Superadmins always bypass this matrix.
 ADMIN_PERMISSION_KEYS = {
     'users.create_employee', 'users.create_admin', 'users.manage_status',
@@ -144,8 +152,14 @@ with SessionLocal() as _migration_db:
         _user.public_id = make_public_user_id(_migration_db)
     _migration_db.commit()
 
-app = FastAPI(title='X-Wallet Chat Management', version='7.8.1')
-# Memory cache prevents connected-account avatar refresh from failing on a full Railway volume.
+app = FastAPI(title='X-Wallet Chat Management', version='7.8.3')
+# Telegram profile requests are deliberately throttled. Loading 20+ account
+# profiles at once can saturate Telegram clients and make Railway stop responding.
+_TELEGRAM_PROFILE_SEMAPHORE = asyncio.Semaphore(3)
+_TELEGRAM_PROFILE_LOCKS: dict[int, asyncio.Lock] = {}
+_TELEGRAM_PROFILE_CACHE: dict[int, tuple[float, dict]] = {}
+_TELEGRAM_PROFILE_CACHE_TTL = 300  # seconds
+# Memory fallback is used only when the Railway volume cannot store the photo.
 _TELEGRAM_ACCOUNT_AVATAR_CACHE: dict[int, bytes] = {}
 # Restrict cross-origin browser access. Same-origin requests need no CORS entry.
 _configured_origins = [item.strip().rstrip('/') for item in settings.cors_origins.split(',') if item.strip()]
@@ -282,6 +296,17 @@ def safe_upload_path(relative):
         raise HTTPException(404, 'Media file not found')
     return full
 
+async def restore_telegram_and_queue_dialog_sync():
+    """Restore saved Telegram sessions after the HTTP service is already accepting traffic."""
+    try:
+        await tg.restore_clients()
+        for account_id, client in list(tg._clients.items()):
+            if client and client.is_connected():
+                tg.queue_account_sync(account_id, sync_messages=False)
+    except Exception as exc:
+        print('background Telegram restore/sync startup failed:', repr(exc))
+
+
 @app.on_event('startup')
 async def startup():
     db = SessionLocal()
@@ -293,15 +318,16 @@ async def startup():
     # Attendance Bot A runs in its own Railway service. This app only accepts
     # signed attendance events; it must never call getUpdates for Bot A.
     if settings.telegram_api_id and settings.telegram_api_hash and settings.session_encryption_key:
-        # Await restoration so Sync buttons cannot race startup and report a false
-        # 'not connected' state while the account is still being rehydrated.
-        await tg.restore_clients()
+        # Do not block Railway's startup/healthcheck on 20+ Telegram logins.
+        # The DB-backed API becomes ready first; account restore and dialog import
+        # run in a bounded background task and are visible in admin diagnostics.
+        app.state.telegram_restore_task = asyncio.create_task(restore_telegram_and_queue_dialog_sync())
 
 @app.on_event('shutdown')
 async def shutdown_employee_alerts():
-    for name in ('employee_alert_task',):
+    for name in ('employee_alert_task', 'telegram_restore_task'):
         task = getattr(app.state, name, None)
-        if task:
+        if task and not task.done():
             task.cancel()
             try:
                 await task
@@ -751,9 +777,15 @@ async def telegram_begin(data:PhoneIn, actor:User=Depends(admin)):
 @app.post('/api/admin/telegram/complete')
 async def telegram_complete(data:CodeIn, db:Session=Depends(get_db), actor:User=Depends(admin)):
     require_permission(actor, 'telegram.connect')
+    actor_id = actor.id
+    db.close()  # Telegram code/2FA RPCs must not hold a PostgreSQL connection.
     try:
         result=await tg.finish_login(data.phone_code_hash,data.code,data.password)
-        if result.get('account_id'): audit(db,actor,'telegram.account.connect','telegram_account',result['account_id'])
+        if result.get('account_id'):
+            with SessionLocal() as audit_db:
+                audit_actor = audit_db.get(User, actor_id)
+                if audit_actor:
+                    audit(audit_db,audit_actor,'telegram.account.connect','telegram_account',result['account_id'])
         return result
     except Exception as e: raise HTTPException(400,str(e))
 
@@ -798,47 +830,63 @@ def set_telegram_account_owner(account_id: int, data: dict, db: Session = Depend
 
 @app.post('/api/admin/telegram/accounts/{account_id}/disconnect')
 async def disconnect_telegram_account(account_id: int, db: Session = Depends(get_db), actor: User = Depends(admin)):
-    """Disconnect the Telegram client but retain the encrypted session and all customer history."""
+    """Disconnect Telegram without holding a DB connection during network teardown."""
     require_permission(actor, 'telegram.connect')
     account = db.get(TgAccount, account_id)
     if not account or account.status == 'deleted':
         raise HTTPException(404, 'Telegram account not found.')
+    actor_id = actor.id
+    db.close()
     client = tg._clients.pop(account_id, None)
     if client:
         try:
             if client.is_connected():
-                await client.disconnect()
+                await asyncio.wait_for(client.disconnect(), timeout=10)
         except Exception as exc:
-            # The server-side client may already be disconnected; still persist the requested state.
             print('telegram account disconnect:', account_id, type(exc).__name__)
-    account.status = 'disconnected'
-    db.commit()
-    audit(db, actor, 'telegram.account.disconnect', 'telegram_account', account_id,
-          'session retained; customer and message history preserved')
-    return {'ok': True, 'status': account.status, 'history_preserved': True}
+    _TELEGRAM_PROFILE_CACHE.pop(account_id, None)
+    with SessionLocal() as write_db:
+        row = write_db.get(TgAccount, account_id)
+        if row and row.status != 'deleted':
+            row.status = 'disconnected'
+            audit_actor = write_db.get(User, actor_id)
+            if audit_actor:
+                audit(write_db, audit_actor, 'telegram.account.disconnect', 'telegram_account', account_id,
+                      'session retained; customer and message history preserved')
+            else:
+                write_db.commit()
+    return {'ok': True, 'status': 'disconnected', 'history_preserved': True}
 
 @app.delete('/api/admin/telegram/accounts/{account_id}')
 async def delete_telegram_account(account_id: int, db: Session = Depends(get_db), actor: User = Depends(superadmin)):
-    """Permanently revoke account credentials while retaining the DB row as a history archive anchor."""
+    """Revoke account credentials while preserving customer and message history."""
     account = db.get(TgAccount, account_id)
     if not account or account.status == 'deleted':
         raise HTTPException(404, 'Telegram account not found or already deleted.')
-    # The TgAccount row is retained because Customer rows reference it. Credentials are erased,
-    # while customers, messages, assignments, tags, and media remain intact for historical access.
+    actor_id = actor.id
+    db.close()
     client = tg._clients.pop(account_id, None)
     if client:
         try:
             if client.is_connected():
-                await client.disconnect()
+                await asyncio.wait_for(client.disconnect(), timeout=10)
         except Exception as exc:
             print('telegram account delete disconnect:', account_id, type(exc).__name__)
-    account.session_ciphertext = ''
-    account.status = 'deleted'
-    account.assigned_user_id = None
     _TELEGRAM_ACCOUNT_AVATAR_CACHE.pop(account_id, None)
-    db.commit()
-    audit(db, actor, 'telegram.account.delete', 'telegram_account', account_id,
-          'credentials erased; customer/message/history rows retained')
+    _TELEGRAM_PROFILE_CACHE.pop(account_id, None)
+    with SessionLocal() as write_db:
+        row = write_db.get(TgAccount, account_id)
+        if not row or row.status == 'deleted':
+            raise HTTPException(404, 'Telegram account not found or already deleted.')
+        row.session_ciphertext = ''
+        row.status = 'deleted'
+        row.assigned_user_id = None
+        audit_actor = write_db.get(User, actor_id)
+        if audit_actor:
+            audit(write_db, audit_actor, 'telegram.account.delete', 'telegram_account', account_id,
+                  'credentials erased; customer/message/history rows retained')
+        else:
+            write_db.commit()
     return {'ok': True, 'deleted': True, 'history_preserved': True}
 
 @app.post('/api/admin/telegram/accounts/{account_id}/sync')
@@ -849,69 +897,125 @@ async def admin_sync_telegram_account(account_id: int, db: Session = Depends(get
         raise HTTPException(404, 'Telegram account not found')
     client = tg._clients.get(account_id)
     if not client or not client.is_connected():
-        raise HTTPException(409, 'Telegram account is not connected. Reconnect this account first.')
-    # Queue Telegram network work and return immediately; the UI can keep responding
-    # while Telegram enumerates dialogs and downloads history.
-    async def run_account_sync(aid, telegram_client):
-        try:
-            result = await tg.sync_dialogs(aid, telegram_client, sync_messages=False)
-            with SessionLocal() as sync_db:
-                count = sync_db.query(Customer).filter_by(account_id=aid).count()
-                audit(sync_db, actor, 'telegram.account.sync', 'telegram_account', aid,
-                      f'customers={count}; dialogs={result.get("dialog_count", 0)}')
-            await tg.sync_dialog_messages(aid, telegram_client)
-        except Exception as exc:
-            print('background Telegram account sync failed:', aid, repr(exc))
-    asyncio.create_task(run_account_sync(account_id, client))
-    count = db.query(Customer).filter_by(account_id=account_id).count()
-    return {'ok': True, 'queued': True, 'customer_count': count,
-            'message': 'Telegram sync was queued. Existing customers remain available while new chats and history are imported in the background.'}
+        raise HTTPException(409, 'Telegram account is still restoring or disconnected. Wait for restore to finish, then retry.')
+    actor_id = actor.id
+    db.close()
+    queued = tg.queue_account_sync(account_id, sync_messages=True)
+    with SessionLocal() as write_db:
+        audit_actor = write_db.get(User, actor_id)
+        if audit_actor:
+            audit(write_db, audit_actor, 'telegram.account.sync.queued', 'telegram_account', account_id,
+                  'sync_messages=True')
+    with SessionLocal() as count_db:
+        count = count_db.query(Customer).filter_by(account_id=account_id).count()
+    return {'ok': True, **queued, 'customer_count': count,
+            'message': 'Telegram sync queued. Dialog/customer indexing runs before history import.'}
 
-@app.get('/api/admin/telegram/accounts/{account_id}/profile')
-async def admin_telegram_account_profile(account_id: int, actor: User = Depends(admin)):
-    # IMPORTANT: never keep a SQLAlchemy connection checked out while awaiting
-    # Telegram network operations. A DB session held across get_me()/photo
-    # downloads can exhaust Railway's entire QueuePool under concurrent requests.
+@app.get('/api/admin/telegram/accounts/{account_id}/sync-status')
+def admin_telegram_sync_status(account_id: int, actor: User = Depends(admin)):
     if actor.role != 'superadmin' and not ({'telegram.connect','telegram.sync'} & set(user_permissions(actor))):
         raise HTTPException(403, 'Missing Telegram account permission')
+    return tg.account_sync_status(account_id)
+
+@app.get('/api/admin/telegram/sync-status')
+def admin_telegram_sync_status_all(db: Session = Depends(get_db), actor: User = Depends(admin)):
+    if actor.role != 'superadmin' and not ({'telegram.connect','telegram.sync'} & set(user_permissions(actor))):
+        raise HTTPException(403, 'Missing Telegram account permission')
+    rows = db.query(TgAccount).filter(TgAccount.status != 'deleted').order_by(TgAccount.id).all()
+    return {
+        'restore_running': bool(getattr(app.state, 'telegram_restore_task', None) and not app.state.telegram_restore_task.done()),
+        'clients_restored': len(tg._clients),
+        'accounts': [
+            {'account_id': row.id, 'status': row.status,
+             'client_connected': bool(tg._clients.get(row.id) and tg._clients[row.id].is_connected()),
+             **tg.account_sync_status(row.id)}
+            for row in rows
+        ]
+    }
+
+@app.get('/api/admin/telegram/accounts/{account_id}/profile')
+async def admin_telegram_account_profile(account_id: int, actor: User = Depends(admin), refresh: bool = False):
+    """Return a cached Telegram profile; never fan out unbounded Telegram requests."""
+    if actor.role != 'superadmin' and not ({'telegram.connect','telegram.sync'} & set(user_permissions(actor))):
+        raise HTTPException(403, 'Missing Telegram account permission')
+
+    # Read the account label in a short-lived DB session, then release the
+    # connection before any Telegram network call.
     with SessionLocal() as db:
         account = db.get(TgAccount, account_id)
         if not account or account.status == 'deleted':
             raise HTTPException(404, 'Telegram account not found.')
         saved_label = account.label or ''
 
+    now_ts = time.time()
+    cached = _TELEGRAM_PROFILE_CACHE.get(account_id)
+    if not refresh and cached and now_ts - cached[0] < _TELEGRAM_PROFILE_CACHE_TTL:
+        return dict(cached[1])
+
     client = tg._clients.get(account_id)
     if not client or not client.is_connected():
         raise HTTPException(409, 'Telegram account is not connected.')
 
-    me = await client.get_me()
-    name = ' '.join(filter(None, [getattr(me, 'first_name', ''), getattr(me, 'last_name', '')])).strip()
-    if name and saved_label != name[:120]:
-        with SessionLocal() as db:
-            account = db.get(TgAccount, account_id)
-            if account and account.status != 'deleted':
-                account.label = name[:120]
-                db.commit()
+    lock = _TELEGRAM_PROFILE_LOCKS.setdefault(account_id, asyncio.Lock())
+    async with lock:
+      async with _TELEGRAM_PROFILE_SEMAPHORE:
+        # Recheck after waiting for a slot; another request may have populated it.
+        now_ts = time.time()
+        cached = _TELEGRAM_PROFILE_CACHE.get(account_id)
+        if not refresh and cached and now_ts - cached[0] < _TELEGRAM_PROFILE_CACHE_TTL:
+            return dict(cached[1])
 
-    # Avoid filesystem writes: keep the avatar in memory.
-    avatar_available = account_id in _TELEGRAM_ACCOUNT_AVATAR_CACHE
-    try:
-        photo_bytes = await client.download_profile_photo(me, file=bytes)
-        if photo_bytes:
-            _TELEGRAM_ACCOUNT_AVATAR_CACHE[account_id] = photo_bytes
-            avatar_available = True
-    except Exception as exc:
-        print('telegram account avatar sync (memory cache):', repr(exc))
-        avatar_available = avatar_available or os.path.isfile(os.path.join(UPLOAD_ROOT, f'tg_account_{account_id}_avatar.jpg'))
+        try:
+            me = await asyncio.wait_for(client.get_me(), timeout=15)
+        except asyncio.TimeoutError:
+            raise HTTPException(504, 'Telegram profile request timed out. Try Refresh profile again.')
+        except Exception as exc:
+            print('telegram profile get_me failed:', account_id, repr(exc))
+            raise HTTPException(502, 'Telegram profile is temporarily unavailable. Try again shortly.')
 
-    return {
-        'id': getattr(me, 'id', None),
-        'name': name or saved_label or str(account_id),
-        'username': getattr(me, 'username', '') or '',
-        'phone': getattr(me, 'phone', '') or '',
-        'avatar_available': avatar_available,
-        'avatar_url': f'/api/admin/telegram/accounts/{account_id}/avatar?v={int(datetime.now().timestamp())}' if avatar_available else None
-    }
+        name = ' '.join(filter(None, [getattr(me, 'first_name', ''), getattr(me, 'last_name', '')])).strip()
+        if name and saved_label != name[:120]:
+            try:
+                with SessionLocal() as db:
+                    account = db.get(TgAccount, account_id)
+                    if account and account.status != 'deleted':
+                        account.label = name[:120]
+                        db.commit()
+            except Exception as exc:
+                print('telegram profile label update failed:', account_id, repr(exc))
+
+        # Persist the photo on the Railway volume so it survives process restarts.
+        avatar_path = os.path.join(UPLOAD_ROOT, f'tg_account_{account_id}_avatar.jpg')
+        avatar_available = os.path.isfile(avatar_path) or account_id in _TELEGRAM_ACCOUNT_AVATAR_CACHE
+        if not avatar_available:
+            try:
+                saved_photo = await asyncio.wait_for(
+                    client.download_profile_photo(me, file=avatar_path), timeout=12
+                )
+                avatar_available = bool(saved_photo and os.path.isfile(avatar_path))
+            except Exception as exc:
+                # Keep a memory fallback for deployments whose volume is full/read-only.
+                print('telegram account avatar sync:', account_id, repr(exc))
+                try:
+                    photo_bytes = await asyncio.wait_for(
+                        client.download_profile_photo(me, file=bytes), timeout=8
+                    )
+                    if photo_bytes:
+                        _TELEGRAM_ACCOUNT_AVATAR_CACHE[account_id] = photo_bytes
+                        avatar_available = True
+                except Exception as fallback_exc:
+                    print('telegram account avatar memory fallback:', account_id, repr(fallback_exc))
+
+        profile = {
+            'id': getattr(me, 'id', None),
+            'name': name or saved_label or str(account_id),
+            'username': getattr(me, 'username', '') or '',
+            'phone': getattr(me, 'phone', '') or '',
+            'avatar_available': avatar_available,
+            'avatar_url': f'/api/admin/telegram/accounts/{account_id}/avatar' if avatar_available else None
+        }
+        _TELEGRAM_PROFILE_CACHE[account_id] = (time.time(), profile)
+        return dict(profile)
 
 @app.get('/api/admin/telegram/accounts/{account_id}/avatar')
 def admin_telegram_account_avatar(account_id: int, actor: User = Depends(admin)):
@@ -1116,43 +1220,52 @@ async def message_media(mid:int, db:Session=Depends(get_db), user:User=Depends(c
     msg=db.get(Message,mid)
     if not msg or not can_access(db,user,msg.customer_id):
         raise HTTPException(404,'Media not found')
-    path = ''
-    if msg.media_path:
+    customer=db.get(Customer,msg.customer_id)
+    snapshot = {
+        'customer_id': msg.customer_id,
+        'account_id': customer.account_id if customer else None,
+        'peer_id': customer.telegram_peer_id if customer else None,
+        'telegram_message_id': msg.telegram_message_id,
+        'media_path': msg.media_path,
+        'media_pending': msg.media_pending,
+    }
+    db.close()  # Telegram downloads must not hold a PostgreSQL connection.
+    path=''
+    if snapshot['media_path']:
         try:
-            path = safe_upload_path(msg.media_path)
+            path=safe_upload_path(snapshot['media_path'])
         except HTTPException:
-            path = ''
-    # Lazy recovery: if the file was missed during an earlier sync or the volume
-    # was full, fetch the original Telegram message when the user opens it.
+            path=''
     if not path:
-        customer = db.get(Customer, msg.customer_id)
-        account_id = customer.account_id if customer else None
-        client = tg._clients.get(account_id) if account_id else None
-        if client and client.is_connected() and msg.telegram_message_id:
+        account_id=snapshot['account_id']
+        client=tg._clients.get(account_id) if account_id else None
+        if client and client.is_connected() and snapshot['telegram_message_id'] and snapshot['peer_id']:
             try:
-                peer = await client.get_input_entity(int(customer.telegram_peer_id))
-                original = await client.get_messages(peer, ids=int(msg.telegram_message_id))
-                if original and getattr(original, 'media', None):
-                    msg.media_type = tg.message_media_kind(original)
-                    msg.media_pending = True
-                    recovered = await tg.save_message_media(account_id, original, customer.id)
-                    if recovered and os.path.isfile(recovered) and os.path.getsize(recovered) > 0:
-                        msg.media_path = os.path.relpath(recovered, UPLOAD_ROOT)
-                        msg.media_pending = False
-                        db.commit()
-                        path = safe_upload_path(msg.media_path)
+                peer=await client.get_input_entity(int(snapshot['peer_id']))
+                original=await client.get_messages(peer,ids=int(snapshot['telegram_message_id']))
+                if original and getattr(original,'media',None):
+                    recovered=await tg.save_message_media(account_id,original,snapshot['customer_id'])
+                    if recovered and os.path.isfile(recovered) and os.path.getsize(recovered)>0:
+                        rel=os.path.relpath(recovered,UPLOAD_ROOT)
+                        with SessionLocal() as write_db:
+                            row=write_db.get(Message,mid)
+                            if row:
+                                row.media_path=rel
+                                row.media_type=tg.message_media_kind(original)
+                                row.media_pending=False
+                                write_db.commit()
+                        path=safe_upload_path(rel)
             except Exception as exc:
-                db.rollback()
-                print('telegram lazy media recovery:', repr(exc))
+                print('telegram lazy media recovery:',repr(exc))
     if not path:
         raise HTTPException(404,'Media is not available locally and could not be recovered from Telegram. Check the Telegram connection and Railway volume.')
-    guessed = mimetypes.guess_type(path)[0] or 'application/octet-stream'
-    ext = os.path.splitext(path)[1].lower()
+    guessed=mimetypes.guess_type(path)[0] or 'application/octet-stream'
+    ext=os.path.splitext(path)[1].lower()
     if ext in ('.ogg','.oga','.opus','.mp3','.m4a','.wav','.aac','.flac','.3gp') and not guessed.startswith('audio/'):
-        guessed = 'audio/ogg' if ext in ('.ogg','.oga','.opus') else 'audio/mpeg'
+        guessed='audio/ogg' if ext in ('.ogg','.oga','.opus') else 'audio/mpeg'
     if ext in ('.mp4','.mov','.m4v','.webm','.mkv','.avi','.3gp') and not guessed.startswith('video/'):
-        guessed = 'video/mp4' if ext != '.webm' else 'video/webm'
-    return FileResponse(path, media_type=guessed, headers={'Content-Disposition': 'inline; filename=\"' + os.path.basename(path).replace('\"','') + '\"'})
+        guessed='video/mp4' if ext!='.webm' else 'video/webm'
+    return FileResponse(path,media_type=guessed,headers={'Content-Disposition':'inline; filename="'+os.path.basename(path).replace('"','')+'"'})
 
 @app.post('/api/messages/{mid}/transcribe')
 async def transcribe_message(mid:int, db:Session=Depends(get_db), user:User=Depends(current_user)):
@@ -1161,15 +1274,17 @@ async def transcribe_message(mid:int, db:Session=Depends(get_db), user:User=Depe
         raise HTTPException(404,'Voice message not found')
     if msg.transcript:
         return {'ok':True,'transcript':msg.transcript,'cached':True}
-    path=safe_upload_path(msg.media_path)
-    kind=media_kind(msg.media_path)
-    if kind != 'audio':
+    media_path=msg.media_path
+    path=safe_upload_path(media_path)
+    kind=media_kind(media_path)
+    if kind!='audio':
         raise HTTPException(415,'Only voice/audio messages can be transcribed.')
     if not settings.openai_api_key:
         raise HTTPException(503,'Voice transcription is not configured. Add OPENAI_API_KEY to Railway Variables, then redeploy.')
     size=os.path.getsize(path)
-    if size > 25*1024*1024:
+    if size>25*1024*1024:
         raise HTTPException(413,'This audio file is larger than the 25 MB transcription limit.')
+    db.close()  # OpenAI transcription can take a long time; release DB connection first.
     try:
         import httpx
         async with httpx.AsyncClient(timeout=180) as client:
@@ -1180,16 +1295,19 @@ async def transcribe_message(mid:int, db:Session=Depends(get_db), user:User=Depe
                     data={'model':settings.transcription_model,'response_format':'json'},
                     files={'file':(os.path.basename(path),audio_file,mimetypes.guess_type(path)[0] or 'audio/ogg')}
                 )
-        if response.status_code >= 400:
+        if response.status_code>=400:
             detail='Voice transcription provider rejected the request.'
             try: detail=response.json().get('error',{}).get('message') or detail
             except Exception: pass
-            raise HTTPException(response.status_code if response.status_code < 500 else 502,detail)
+            raise HTTPException(response.status_code if response.status_code<500 else 502,detail)
         transcript=(response.json().get('text') or '').strip()
         if not transcript:
             raise HTTPException(422,'No speech was detected in this audio.')
-        msg.transcript=transcript
-        db.commit()
+        with SessionLocal() as write_db:
+            row=write_db.get(Message,mid)
+            if row:
+                row.transcript=transcript
+                write_db.commit()
         return {'ok':True,'transcript':transcript,'cached':False}
     except HTTPException:
         raise
@@ -1198,21 +1316,38 @@ async def transcribe_message(mid:int, db:Session=Depends(get_db), user:User=Depe
 
 @app.post('/api/customers/{cid}/send')
 async def send(cid:int,data:SendIn, db:Session=Depends(get_db), user:User=Depends(current_user)):
-    c=db.get(Customer,cid)
-    if not c or not can_access(db,user,cid): raise HTTPException(404,'Customer not found')
-    try: sent=await tg.send_message(c.account_id,c,data.text)
-    except Exception as e: raise HTTPException(400,str(e))
-    m=db.query(Message).filter_by(customer_id=cid,telegram_message_id=str(sent.id)).first()
-    if not m:
-        m=Message(customer_id=cid,telegram_message_id=str(sent.id),direction='out',body=data.text,sent_at=sent.date or datetime.now(timezone.utc),sender_label=user.username)
-        db.add(m); db.commit(); db.refresh(m)
-    return {'ok':True,'message':{'id':m.id,'direction':'out','text':m.body,'sent_at':utc_iso(m.sent_at),'sender':m.sender_label}}
+    customer = db.get(Customer, cid)
+    if not customer or not can_access(db, user, cid):
+        raise HTTPException(404, 'Customer not found')
+    account_id = customer.account_id
+    peer_id = customer.telegram_peer_id
+    sender_name = user.username
+    db.close()  # Do not hold a PostgreSQL connection while Telegram responds.
+    customer_snapshot = type('CustomerSnapshot', (), {'telegram_peer_id': peer_id})()
+    try:
+        sent = await tg.send_message(account_id, customer_snapshot, data.text)
+    except Exception as exc:
+        raise HTTPException(502, 'Telegram send failed: ' + str(exc)[:240])
+    with SessionLocal() as write_db:
+        message = write_db.query(Message).filter_by(customer_id=cid, telegram_message_id=str(sent.id)).first()
+        if not message:
+            message = Message(customer_id=cid, telegram_message_id=str(sent.id), direction='out', body=data.text,
+                              sent_at=sent.date or datetime.now(timezone.utc), sender_label=sender_name)
+            write_db.add(message)
+            write_db.commit()
+            write_db.refresh(message)
+        result = {'id': message.id, 'direction': 'out', 'text': message.body,
+                  'sent_at': utc_iso(message.sent_at), 'sender': message.sender_label}
+    return {'ok': True, 'message': result}
 
 @app.post('/api/customers/{cid}/upload')
 async def upload_customer_media(cid:int, file:UploadFile=File(...), caption:str=Form(''),
                                 db:Session=Depends(get_db), user:User=Depends(current_user)):
-    c=db.get(Customer,cid)
-    if not c or not can_access(db,user,cid): raise HTTPException(404,'Customer not found')
+    customer = db.get(Customer, cid)
+    if not customer or not can_access(db, user, cid):
+        raise HTTPException(404, 'Customer not found')
+    account_id, peer_id, sender_name = customer.account_id, customer.telegram_peer_id, user.username
+    db.close()
     ext=os.path.splitext(file.filename or '')[1].lower()
     if ext not in ALLOWED_MEDIA_EXTENSIONS:
         raise HTTPException(415,'Only photos, videos, and audio/voice files are supported.')
@@ -1222,17 +1357,20 @@ async def upload_customer_media(cid:int, file:UploadFile=File(...), caption:str=
     filename=f"upload_{uuid.uuid4().hex}{ext}"
     full=os.path.join(UPLOAD_ROOT,filename)
     with open(full,'wb') as target: target.write(content)
+    customer_snapshot = type('CustomerSnapshot', (), {'telegram_peer_id': peer_id})()
     try:
-        sent=await tg.send_media(c.account_id,c,full,caption.strip())
+        sent=await tg.send_media(account_id,customer_snapshot,full,caption.strip())
         rel=os.path.relpath(full,UPLOAD_ROOT)
-        msg=Message(customer_id=cid,telegram_message_id=str(sent.id),direction='out',body=caption.strip(),
-                    media_path=rel,sent_at=sent.date or datetime.now(timezone.utc),sender_label=user.username)
-        db.add(msg); db.commit(); db.refresh(msg)
-        return {'ok':True,'message_id':msg.id}
+        with SessionLocal() as write_db:
+            msg=Message(customer_id=cid,telegram_message_id=str(sent.id),direction='out',body=caption.strip(),
+                        media_path=rel,sent_at=sent.date or datetime.now(timezone.utc),sender_label=sender_name)
+            write_db.add(msg); write_db.commit(); write_db.refresh(msg)
+            message_id = msg.id
+        return {'ok':True,'message_id':message_id}
     except Exception as exc:
         try: os.remove(full)
         except OSError: pass
-        raise HTTPException(400,str(exc))
+        raise HTTPException(502,'Telegram media send failed: '+str(exc)[:240])
 
 @app.post('/api/messages/{mid}/forward')
 async def forward_chat_message(mid:int, data:ForwardIn, db:Session=Depends(get_db), user:User=Depends(current_user)):
@@ -1245,16 +1383,23 @@ async def forward_chat_message(mid:int, data:ForwardIn, db:Session=Depends(get_d
         raise HTTPException(404,'Target customer not found')
     if source.account_id != target.account_id:
         raise HTTPException(400,'Messages can only be forwarded between customers connected to the same Telegram account.')
+    account_id, source_peer, target_peer = source.account_id, source.telegram_peer_id, target.telegram_peer_id
+    source_tg_message_id, source_body, source_media = source_msg.telegram_message_id, source_msg.body, source_msg.media_path
+    target_id, sender_name = target.id, user.username
+    db.close()
+    source_snapshot = type('CustomerSnapshot', (), {'telegram_peer_id': source_peer})()
+    target_snapshot = type('CustomerSnapshot', (), {'telegram_peer_id': target_peer})()
     try:
-        sent=await tg.forward_message(source.account_id,source,target,source_msg.telegram_message_id)
-        row=Message(customer_id=target.id,telegram_message_id=str(sent.id),direction='out',
-                    body=source_msg.body,media_path=source_msg.media_path,
-                    sent_at=sent.date or datetime.now(timezone.utc),sender_label=user.username)
-        if not db.query(Message).filter_by(customer_id=target.id,telegram_message_id=str(sent.id)).first():
-            db.add(row);db.commit()
-        return {'ok':True,'target_customer_id':target.id}
+        sent=await tg.forward_message(account_id,source_snapshot,target_snapshot,source_tg_message_id)
+        with SessionLocal() as write_db:
+            if not write_db.query(Message).filter_by(customer_id=target_id,telegram_message_id=str(sent.id)).first():
+                row=Message(customer_id=target_id,telegram_message_id=str(sent.id),direction='out',
+                            body=source_body,media_path=source_media,
+                            sent_at=sent.date or datetime.now(timezone.utc),sender_label=sender_name)
+                write_db.add(row);write_db.commit()
+        return {'ok':True,'target_customer_id':target_id}
     except Exception as exc:
-        raise HTTPException(400,str(exc))
+        raise HTTPException(502,'Telegram forward failed: '+str(exc)[:240])
 
 @app.post('/api/customers/{cid}/read')
 def mark_read(cid:int, db:Session=Depends(get_db), user:User=Depends(current_user)):
@@ -1356,7 +1501,9 @@ async def test_employee_offline_alert(db: Session = Depends(get_db), actor: User
     groups = [str(value).strip() for value in configured if _is_telegram_group_chat_id(str(value))]
     if not groups:
         raise HTTPException(400, '请在离线通知中配置至少一个负数格式的 Telegram 群组 Chat ID。员工私人 ID 应放在打卡管理的对照表中。')
+    actor_id = actor.id
     message = f'X-WALLET test notification\nStatus: Group delivery is working\nTime: {datetime.now(ZoneInfo("Asia/Yangon")).strftime("%Y-%m-%d %H:%M:%S")} (MMT)'
+    db.close()
     results = []
     async with httpx.AsyncClient(timeout=10.0) as client:
         for chat_id in groups:
@@ -1369,7 +1516,10 @@ async def test_employee_offline_alert(db: Session = Depends(get_db), actor: User
                     results.append({'chat_id': chat_id, 'ok': False, 'error': str(payload.get('description') or f'HTTP {response.status_code}')[:240]})
             except Exception as exc:
                 results.append({'chat_id': chat_id, 'ok': False, 'error': type(exc).__name__})
-    audit(db, actor, 'employee.offline_alert_test', 'settings', 'employee_offline_alert', f'groups={len(groups)}; delivered={sum(1 for item in results if item["ok"])}')
+    with SessionLocal() as audit_db:
+        audit_actor = audit_db.get(User, actor_id)
+        if audit_actor:
+            audit(audit_db, audit_actor, 'employee.offline_alert_test', 'settings', 'employee_offline_alert', f'groups={len(groups)}; delivered={sum(1 for item in results if item["ok"])}')
     return {'ok': all(item['ok'] for item in results), 'results': results}
 
 @app.get('/api/admin/attendance/config')
@@ -1816,7 +1966,7 @@ def audit_logs(limit:int=100,db:Session=Depends(get_db),actor:User=Depends(admin
     return [{'actor_user_id':r.actor_user_id,'actor_username':(db.get(User, r.actor_user_id).username if r.actor_user_id and db.get(User, r.actor_user_id) else 'System'),'action':r.action,'target_type':r.target_type,'target_id':r.target_id,'detail':r.detail,'created_at':r.created_at.isoformat()} for r in rows]
 
 @app.get('/api/health')
-def health(): return {'ok':True,'service':'telegram-crm'}
+def health(): return {'ok':True,'service':'telegram-crm','version':'7.8.3'}
 
 @app.get('/api/health/ready')
 def readiness(db: Session = Depends(get_db)):
@@ -1824,7 +1974,7 @@ def readiness(db: Session = Depends(get_db)):
         db.execute(text('SELECT 1'))
     except Exception as exc:
         raise HTTPException(503, f'Database is not ready: {type(exc).__name__}')
-    return {'ok': True, 'database': 'connected', 'database_dialect': engine.dialect.name}
+    return {'ok': True, 'database': 'connected', 'database_dialect': engine.dialect.name, 'telegram_restore': 'running' if getattr(app.state, 'telegram_restore_task', None) and not app.state.telegram_restore_task.done() else 'finished'}
 
 @app.get('/api/admin/diagnostics')
 def diagnostics(db: Session = Depends(get_db), actor: User = Depends(admin)):
@@ -1849,4 +1999,8 @@ def diagnostics(db: Session = Depends(get_db), actor: User = Depends(admin)):
         'active_superadmins_total': len(active_superadmins),
         'telegram_accounts_total': len([a for a in accounts if a.status != 'deleted']),
         'telegram_accounts_connected': len([a for a in accounts if a.status == 'connected']),
+        'telegram_clients_restored': len(tg._clients),
+        'telegram_restore_running': bool(getattr(app.state, 'telegram_restore_task', None) and not app.state.telegram_restore_task.done()),
+        'database_pool_size': engine.pool.size() if hasattr(engine.pool, 'size') else None,
+        'database_pool_checked_out': engine.pool.checkedout() if hasattr(engine.pool, 'checkedout') else None,
     }

@@ -244,3 +244,12 @@ See `PATCH_NOTES_v7.7.6.md`. Startup restores Telegram personal-account connecti
 
 ## v7.8.0 admin dashboard reporting update
 See `PATCH_NOTES_v7.8.0.md`. Adds connected Telegram account count and employee-specific work/attendance KPIs, removes the stray literal `\\n` in Business Label UI, and hides soft-deleted employee accounts from active admin lists without deleting historical records. No schema migration or Railway variable changes are required.
+
+
+## v7.8.3
+
+See `PATCH_NOTES_v7.8.3.md` for Railway Hobby concurrency hardening, background Telegram restoration, automatic dialog indexing, and the required 50-user acceptance test.
+
+### 50-employee acceptance test
+
+Use `tools/load_test_50.py` with a private JSON file containing 50 separate employee username/password pairs. It performs concurrent login and read/presence traffic only; it does not send messages to customers. Follow it with manual send/receive tests on designated test Telegram accounts and inspect Railway CPU, memory, PostgreSQL connection counts, and 5xx logs. See `PATCH_NOTES_v7.8.3.md` for pass/fail criteria.
