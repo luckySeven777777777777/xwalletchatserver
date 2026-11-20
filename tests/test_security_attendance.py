@@ -84,3 +84,11 @@ def test_attendance_group_id_must_match_exactly():
     with pytest.raises(HTTPException) as exc:
         _validate_attendance_group_id("", "-1001234567890")
     assert exc.value.status_code == 503
+
+
+def test_offline_alert_recipient_must_be_group_chat_not_private_user():
+    from app.main import _is_telegram_group_chat_id
+    assert _is_telegram_group_chat_id('-1001234567890')
+    assert _is_telegram_group_chat_id('-123456')
+    assert not _is_telegram_group_chat_id('123456789')
+    assert not _is_telegram_group_chat_id('')

@@ -240,11 +240,3 @@ Keep the existing `ATTENDANCE_INGEST_SECRET` unchanged for this deployment if it
 
 ## v7.7.6 hotfix
 See `PATCH_NOTES_v7.7.6.md`. Startup restores Telegram personal-account connections without automatically downloading every dialog avatar/history. Telegram clients disconnect gracefully on service shutdown. Manual admin sync remains available.
-
-
-## v7.7.9 employee offline alert diagnostics
-The employee offline alert worker now logs Telegram's HTTP status and API error description while masking recipient chat IDs and never logging bot tokens. If delivery fails, use the `telegram_error` detail in Railway Deploy Logs to identify whether the alert bot token, recipient chat ID, or Telegram group permissions need correction. This diagnostic update preserves the existing alert schedule and retry behavior.
-
-
-## v7.7.9 — Employee offline alert diagnostics
-Super Admin can now send a test notification to the configured offline-alert recipients. The result displays Telegram's HTTP status and error description per recipient. Background alert logs also report the Telegram API reason while masking chat IDs and never logging the bot token. Use the test action to distinguish an invalid bot token, unknown chat, blocked bot, missing group permission, or network failure.

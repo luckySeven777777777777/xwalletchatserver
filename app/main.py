@@ -772,37 +772,15 @@ def telegram_accounts(db:Session=Depends(get_db), actor:User=Depends(admin)):
     return [{'id':a.id,'label':a.label,'phone_masked':a.phone_masked,'status':a.status,
              'created_at':utc_iso(a.created_at),'customer_count':counts.get(a.id,0),
              'assigned_user_id':a.assigned_user_id,
-             'assigned_username':owners[a.assigned_user_id].username if a.assigned_user_id in owners else None}
+             'assigned_username':owners[a.assigned_user_id].username if a.assigned_user_id in owners else None,
+             'deleted': a.status == 'deleted'}
             for a in rows]
-
-@app.post('/api/admin/telegram/accounts/{account_id}/disconnect')
-async def admin_disconnect_telegram_account(account_id: int, db: Session = Depends(get_db), actor: User = Depends(admin)):
-    """Stop one Telegram client without deleting its encrypted session or CRM history."""
-    if actor.role != 'superadmin':
-        raise HTTPException(403, 'Super administrator only')
-    account = db.get(TgAccount, account_id)
-    if not account:
-        raise HTTPException(404, 'Telegram account not found')
-    client = tg._clients.pop(account_id, None)
-    if client:
-        try:
-            if client.is_connected():
-                await client.disconnect()
-        except Exception as exc:
-            # Do not erase the saved session or customer data if network shutdown fails.
-            print('telegram account disconnect:', account_id, repr(exc))
-    account.status = 'disconnected'
-    db.commit()
-    audit(db, actor, 'telegram.account.disconnect', 'telegram_account', account_id,
-          'Encrypted session and customer/message history retained')
-    return {'ok': True, 'account_id': account_id, 'status': account.status,
-            'session_retained': True, 'history_retained': True}
 
 @app.put('/api/admin/telegram/accounts/{account_id}/owner')
 def set_telegram_account_owner(account_id: int, data: dict, db: Session = Depends(get_db), actor: User = Depends(admin)):
     require_permission(actor, 'telegram.connect')
     account = db.get(TgAccount, account_id)
-    if not account:
+    if not account or account.status == 'deleted':
         raise HTTPException(404, 'Telegram account not found')
     raw_owner = data.get('user_id')
     owner = db.get(User, int(raw_owner)) if raw_owner not in (None, '', 0, '0') else None
@@ -818,11 +796,56 @@ def set_telegram_account_owner(account_id: int, data: dict, db: Session = Depend
     return {'ok': True, 'assigned_user_id': account.assigned_user_id,
             'assigned_username': owner.username if owner else None}
 
+@app.post('/api/admin/telegram/accounts/{account_id}/disconnect')
+async def disconnect_telegram_account(account_id: int, db: Session = Depends(get_db), actor: User = Depends(admin)):
+    """Disconnect the Telegram client but retain the encrypted session and all customer history."""
+    require_permission(actor, 'telegram.connect')
+    account = db.get(TgAccount, account_id)
+    if not account or account.status == 'deleted':
+        raise HTTPException(404, 'Telegram account not found.')
+    client = tg._clients.pop(account_id, None)
+    if client:
+        try:
+            if client.is_connected():
+                await client.disconnect()
+        except Exception as exc:
+            # The server-side client may already be disconnected; still persist the requested state.
+            print('telegram account disconnect:', account_id, type(exc).__name__)
+    account.status = 'disconnected'
+    db.commit()
+    audit(db, actor, 'telegram.account.disconnect', 'telegram_account', account_id,
+          'session retained; customer and message history preserved')
+    return {'ok': True, 'status': account.status, 'history_preserved': True}
+
+@app.delete('/api/admin/telegram/accounts/{account_id}')
+async def delete_telegram_account(account_id: int, db: Session = Depends(get_db), actor: User = Depends(superadmin)):
+    """Permanently revoke account credentials while retaining the DB row as a history archive anchor."""
+    account = db.get(TgAccount, account_id)
+    if not account or account.status == 'deleted':
+        raise HTTPException(404, 'Telegram account not found or already deleted.')
+    # The TgAccount row is retained because Customer rows reference it. Credentials are erased,
+    # while customers, messages, assignments, tags, and media remain intact for historical access.
+    client = tg._clients.pop(account_id, None)
+    if client:
+        try:
+            if client.is_connected():
+                await client.disconnect()
+        except Exception as exc:
+            print('telegram account delete disconnect:', account_id, type(exc).__name__)
+    account.session_ciphertext = ''
+    account.status = 'deleted'
+    account.assigned_user_id = None
+    _TELEGRAM_ACCOUNT_AVATAR_CACHE.pop(account_id, None)
+    db.commit()
+    audit(db, actor, 'telegram.account.delete', 'telegram_account', account_id,
+          'credentials erased; customer/message/history rows retained')
+    return {'ok': True, 'deleted': True, 'history_preserved': True}
+
 @app.post('/api/admin/telegram/accounts/{account_id}/sync')
 async def admin_sync_telegram_account(account_id: int, db: Session = Depends(get_db), actor: User = Depends(admin)):
     require_permission(actor, 'telegram.sync')
     account = db.get(TgAccount, account_id)
-    if not account:
+    if not account or account.status == 'deleted':
         raise HTTPException(404, 'Telegram account not found')
     client = tg._clients.get(account_id)
     if not client or not client.is_connected():
@@ -848,7 +871,7 @@ async def admin_sync_telegram_account(account_id: int, db: Session = Depends(get
 async def admin_telegram_account_profile(account_id: int, db: Session = Depends(get_db), actor: User = Depends(admin)):
     if actor.role != 'superadmin' and not ({'telegram.connect','telegram.sync'} & set(user_permissions(actor))): raise HTTPException(403, 'Missing Telegram account permission')
     account = db.get(TgAccount, account_id)
-    if not account:
+    if not account or account.status == 'deleted':
         raise HTTPException(404, 'Telegram account not found.')
     client = tg._clients.get(account_id)
     if not client or not client.is_connected():
@@ -1207,23 +1230,31 @@ def delete_tag(tag_id:int, db:Session=Depends(get_db), user:User=Depends(current
     if not allowed: raise HTTPException(403,'Cannot delete another employee private tag')
     db.delete(tag); db.commit(); audit(db,user,'tag.delete','tag',tag_id); return {'ok':True}
 
+def _is_telegram_group_chat_id(value: str) -> bool:
+    """Telegram numeric group/supergroup IDs are negative; positive IDs are private users."""
+    return bool(re.fullmatch(r'-\d{5,20}', str(value or '').strip()))
+
 @app.get('/api/admin/alerts/offline-config')
 def get_employee_offline_alert_config(db: Session = Depends(get_db), actor: User = Depends(superadmin)):
     row = db.get(EmployeeAlertConfig, 1)
-    chat_ids = []
+    configured_ids = []
     if row:
-        try: chat_ids = json.loads(row.chat_ids or '[]')
-        except Exception: chat_ids = []
-    return {'enabled': bool(row.enabled) if row else False, 'chat_ids': chat_ids,
+        try: configured_ids = json.loads(row.chat_ids or '[]')
+        except Exception: configured_ids = []
+    # Never expose or attempt to use legacy positive/private user IDs as alert recipients.
+    group_ids = [str(value).strip() for value in configured_ids if _is_telegram_group_chat_id(str(value))]
+    ignored_private_ids = max(0, len(configured_ids) - len(group_ids))
+    return {'enabled': bool(row.enabled) if row else False, 'chat_ids': group_ids,
+            'ignored_private_recipient_count': ignored_private_ids,
             'bot_token_configured': bool(row and row.bot_token_ciphertext)}
 
 @app.put('/api/admin/alerts/offline-config')
 def save_employee_offline_alert_config(data: EmployeeAlertConfigIn, db: Session = Depends(get_db), actor: User = Depends(superadmin)):
     chat_ids = list(dict.fromkeys(str(v).strip() for v in data.chat_ids if str(v).strip()))
-    if any(not re.fullmatch(r'-?\d+', value) for value in chat_ids):
-        raise HTTPException(400, 'Chat IDs must be numeric Telegram chat IDs.')
+    if any(not _is_telegram_group_chat_id(value) for value in chat_ids):
+        raise HTTPException(400, '离线通知只接受 Telegram 群组 Chat ID（负数）；员工个人 Telegram ID 请配置在右侧“员工 Telegram User ID 对照表”。')
     if len(chat_ids) > 30:
-        raise HTTPException(400, 'You can configure up to 30 Telegram chat IDs.')
+        raise HTTPException(400, 'You can configure up to 30 Telegram group chat IDs.')
     row = db.get(EmployeeAlertConfig, 1)
     if row is None:
         row = EmployeeAlertConfig(id=1, bot_token_ciphertext='', chat_ids='[]', enabled=False)
@@ -1237,48 +1268,39 @@ def save_employee_offline_alert_config(data: EmployeeAlertConfigIn, db: Session 
     row.chat_ids = json.dumps(chat_ids)
     row.enabled = bool(data.enabled)
     db.commit()
-    audit(db, actor, 'employee.offline_alert_config.update', 'settings', 'employee_offline_alert', f'enabled={row.enabled}; recipients={len(chat_ids)}')
+    audit(db, actor, 'employee.offline_alert_config.update', 'settings', 'employee_offline_alert', f'enabled={row.enabled}; group_recipients={len(chat_ids)}')
     return {'ok': True, 'enabled': row.enabled, 'chat_ids': chat_ids, 'bot_token_configured': bool(row.bot_token_ciphertext)}
 
 @app.post('/api/admin/alerts/offline-test')
-async def test_employee_offline_alert_config(db: Session = Depends(get_db), actor: User = Depends(superadmin)):
-    """Send a one-off test message to configured recipients and report Telegram's exact response."""
+async def test_employee_offline_alert(db: Session = Depends(get_db), actor: User = Depends(superadmin)):
+    """Send one diagnostic message to configured group chats only."""
     import httpx
     row = db.get(EmployeeAlertConfig, 1)
-    if not row or not row.bot_token_ciphertext:
-        raise HTTPException(400, 'Offline alert Bot Token is not configured.')
+    if not row or not row.enabled or not row.bot_token_ciphertext:
+        raise HTTPException(400, '请先启用离线通知并配置 Bot Token。')
     try:
         bot_token = decrypt_session(row.bot_token_ciphertext)
-        recipients = json.loads(row.chat_ids or '[]')
+        configured = json.loads(row.chat_ids or '[]')
     except Exception:
-        raise HTTPException(500, 'Cannot read the saved offline-alert configuration. Check SESSION_ENCRYPTION_KEY.')
-    if not recipients:
-        raise HTTPException(400, 'No Telegram recipient Chat IDs are configured.')
-    message = f'X-WALLET test notification\nSent at: {datetime.now(ZoneInfo("Asia/Yangon")).strftime("%Y-%m-%d %H:%M:%S")} (MMT)\nIf you can read this, the offline-alert bot can deliver messages to this chat.'
+        raise HTTPException(500, '无法读取离线通知配置。')
+    groups = [str(value).strip() for value in configured if _is_telegram_group_chat_id(str(value))]
+    if not groups:
+        raise HTTPException(400, '请在离线通知中配置至少一个负数格式的 Telegram 群组 Chat ID。员工私人 ID 应放在打卡管理的对照表中。')
+    message = f'X-WALLET test notification\nStatus: Group delivery is working\nTime: {datetime.now(ZoneInfo("Asia/Yangon")).strftime("%Y-%m-%d %H:%M:%S")} (MMT)'
     results = []
-    async with httpx.AsyncClient(timeout=8.0) as client:
-        for chat_id in recipients:
-            hint = ('…' + chat_id[-4:]) if len(chat_id) > 4 else '[masked]'
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        for chat_id in groups:
             try:
-                response = await client.post(
-                    f'https://api.telegram.org/bot{bot_token}/sendMessage',
-                    json={'chat_id': chat_id, 'text': message},
-                )
-                try:
-                    payload = response.json()
-                except Exception:
-                    payload = {}
-                description = str(payload.get('description') or ('Message sent' if response.is_success else response.text or 'Telegram request failed'))
-                results.append({
-                    'recipient': hint,
-                    'ok': bool(response.is_success and payload.get('ok')),
-                    'http_status': response.status_code,
-                    'description': re.sub(r'\s+', ' ', description).strip()[:240],
-                })
-            except httpx.RequestError as exc:
-                results.append({'recipient': hint, 'ok': False, 'http_status': None, 'description': type(exc).__name__})
+                response = await client.post(f'https://api.telegram.org/bot{bot_token}/sendMessage', json={'chat_id': chat_id, 'text': message})
+                payload = response.json()
+                if response.is_success and payload.get('ok'):
+                    results.append({'chat_id': chat_id, 'ok': True})
+                else:
+                    results.append({'chat_id': chat_id, 'ok': False, 'error': str(payload.get('description') or f'HTTP {response.status_code}')[:240]})
+            except Exception as exc:
+                results.append({'chat_id': chat_id, 'ok': False, 'error': type(exc).__name__})
+    audit(db, actor, 'employee.offline_alert_test', 'settings', 'employee_offline_alert', f'groups={len(groups)}; delivered={sum(1 for item in results if item["ok"])}')
     return {'ok': all(item['ok'] for item in results), 'results': results}
-
 
 @app.get('/api/admin/attendance/config')
 def get_attendance_config(db: Session = Depends(get_db), actor: User = Depends(superadmin)):
@@ -1492,7 +1514,13 @@ async def employee_offline_alert_loop():
                     if cfg and cfg.enabled and cfg.bot_token_ciphertext:
                         try:
                             bot_token = decrypt_session(cfg.bot_token_ciphertext)
-                            recipients = json.loads(cfg.chat_ids or '[]')
+                            configured_recipients = json.loads(cfg.chat_ids or '[]')
+                            if not isinstance(configured_recipients, list):
+                                configured_recipients = []
+                            recipients = [str(value).strip() for value in configured_recipients if _is_telegram_group_chat_id(str(value))]
+                            ignored_private_count = len(configured_recipients) - len(recipients)
+                            if ignored_private_count:
+                                print(f'offline alert: ignored {ignored_private_count} private/non-group recipient IDs; configure employee identities under attendance settings')
                         except Exception:
                             bot_token, recipients = '', []
                         if bot_token and recipients:
@@ -1536,46 +1564,12 @@ async def employee_offline_alert_loop():
                                 async with httpx.AsyncClient(timeout=4.0) as client:
                                     for chat_id in recipients:
                                         try:
-                                            resp = await client.post(
-                                                f'https://api.telegram.org/bot{bot_token}/sendMessage',
-                                                json={'chat_id': chat_id, 'text': message},
-                                            )
-                                            # Telegram often returns a useful JSON description (for example
-                                            # "chat not found", "bot was blocked", or "not enough rights").
-                                            # Preserve that diagnostic without ever logging the bot token.
-                                            try:
-                                                telegram_result = resp.json()
-                                            except Exception:
-                                                telegram_result = {}
-                                            if resp.is_error:
-                                                description = str(telegram_result.get('description') or resp.text or 'No response body')
-                                                description = re.sub(r'\s+', ' ', description).strip()[:240]
-                                                status_code = resp.status_code
-                                                recipient_hint = ('…' + chat_id[-4:]) if len(chat_id) > 4 else '[masked]'
-                                                delivered = False
-                                                print(
-                                                    'employee offline alert delivery failed:',
-                                                    f'http_status={status_code}',
-                                                    f'telegram_error={description!r}',
-                                                    f'recipient={recipient_hint}',
-                                                )
-                                            elif not telegram_result.get('ok'):
-                                                description = str(telegram_result.get('description') or 'Telegram returned ok=false')
-                                                description = re.sub(r'\s+', ' ', description).strip()[:240]
-                                                recipient_hint = ('…' + chat_id[-4:]) if len(chat_id) > 4 else '[masked]'
-                                                delivered = False
-                                                print(
-                                                    'employee offline alert delivery failed:',
-                                                    'http_status=200',
-                                                    f'telegram_error={description!r}',
-                                                    f'recipient={recipient_hint}',
-                                                )
-                                        except httpx.RequestError as exc:
-                                            delivered = False
-                                            print('employee offline alert network failure:', type(exc).__name__)
+                                            resp = await client.post(f'https://api.telegram.org/bot{bot_token}/sendMessage', json={'chat_id': chat_id, 'text': message})
+                                            resp.raise_for_status()
+                                            if not resp.json().get('ok'): delivered = False
                                         except Exception as exc:
                                             delivered = False
-                                            print('employee offline alert unexpected failure:', type(exc).__name__)
+                                            print('employee offline alert group delivery failed:', type(exc).__name__, str(exc)[:240])
                                 if delivered:
                                     if state is None:
                                         state = EmployeeAlertState(user_id=user.id, offline_key=event_key, notified_at=datetime.now(timezone.utc))
@@ -1694,7 +1688,7 @@ def stats(db:Session=Depends(get_db), actor:User=Depends(admin)):
     return {
         'employees': len(users), 'online_last_5m': online_count, 'online_members': online_count,
         'active_conversations': active_assignments, 'today_received': today_new,
-        'today_messages': today_messages, 'telegram_accounts': db.query(func.count(TgAccount.id)).scalar() or 0,
+        'today_messages': today_messages, 'telegram_accounts': db.query(func.count(TgAccount.id)).filter(TgAccount.status != 'deleted').scalar() or 0,
         'today_attendance_count': db.query(func.count(EmployeeAttendanceEvent.id)).filter(EmployeeAttendanceEvent.started_at >= today_start).scalar() or 0,
         'staff': staff
     }
@@ -1737,6 +1731,6 @@ def diagnostics(db: Session = Depends(get_db), actor: User = Depends(admin)):
         'cors_origins_configured': bool(_configured_origins),
         'active_superadmins_2fa_enabled': bool(active_superadmins) and all(u.totp_enabled for u in active_superadmins),
         'active_superadmins_total': len(active_superadmins),
-        'telegram_accounts_total': len(accounts),
+        'telegram_accounts_total': len([a for a in accounts if a.status != 'deleted']),
         'telegram_accounts_connected': len([a for a in accounts if a.status == 'connected']),
     }
