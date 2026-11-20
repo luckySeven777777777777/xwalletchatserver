@@ -1240,6 +1240,46 @@ def save_employee_offline_alert_config(data: EmployeeAlertConfigIn, db: Session 
     audit(db, actor, 'employee.offline_alert_config.update', 'settings', 'employee_offline_alert', f'enabled={row.enabled}; recipients={len(chat_ids)}')
     return {'ok': True, 'enabled': row.enabled, 'chat_ids': chat_ids, 'bot_token_configured': bool(row.bot_token_ciphertext)}
 
+@app.post('/api/admin/alerts/offline-test')
+async def test_employee_offline_alert_config(db: Session = Depends(get_db), actor: User = Depends(superadmin)):
+    """Send a one-off test message to configured recipients and report Telegram's exact response."""
+    import httpx
+    row = db.get(EmployeeAlertConfig, 1)
+    if not row or not row.bot_token_ciphertext:
+        raise HTTPException(400, 'Offline alert Bot Token is not configured.')
+    try:
+        bot_token = decrypt_session(row.bot_token_ciphertext)
+        recipients = json.loads(row.chat_ids or '[]')
+    except Exception:
+        raise HTTPException(500, 'Cannot read the saved offline-alert configuration. Check SESSION_ENCRYPTION_KEY.')
+    if not recipients:
+        raise HTTPException(400, 'No Telegram recipient Chat IDs are configured.')
+    message = f'X-WALLET test notification\nSent at: {datetime.now(ZoneInfo("Asia/Yangon")).strftime("%Y-%m-%d %H:%M:%S")} (MMT)\nIf you can read this, the offline-alert bot can deliver messages to this chat.'
+    results = []
+    async with httpx.AsyncClient(timeout=8.0) as client:
+        for chat_id in recipients:
+            hint = ('…' + chat_id[-4:]) if len(chat_id) > 4 else '[masked]'
+            try:
+                response = await client.post(
+                    f'https://api.telegram.org/bot{bot_token}/sendMessage',
+                    json={'chat_id': chat_id, 'text': message},
+                )
+                try:
+                    payload = response.json()
+                except Exception:
+                    payload = {}
+                description = str(payload.get('description') or ('Message sent' if response.is_success else response.text or 'Telegram request failed'))
+                results.append({
+                    'recipient': hint,
+                    'ok': bool(response.is_success and payload.get('ok')),
+                    'http_status': response.status_code,
+                    'description': re.sub(r'\s+', ' ', description).strip()[:240],
+                })
+            except httpx.RequestError as exc:
+                results.append({'recipient': hint, 'ok': False, 'http_status': None, 'description': type(exc).__name__})
+    return {'ok': all(item['ok'] for item in results), 'results': results}
+
+
 @app.get('/api/admin/attendance/config')
 def get_attendance_config(db: Session = Depends(get_db), actor: User = Depends(superadmin)):
     cfg = db.get(AttendanceBotConfig, 1)
@@ -1496,12 +1536,46 @@ async def employee_offline_alert_loop():
                                 async with httpx.AsyncClient(timeout=4.0) as client:
                                     for chat_id in recipients:
                                         try:
-                                            resp = await client.post(f'https://api.telegram.org/bot{bot_token}/sendMessage', json={'chat_id': chat_id, 'text': message})
-                                            resp.raise_for_status()
-                                            if not resp.json().get('ok'): delivered = False
+                                            resp = await client.post(
+                                                f'https://api.telegram.org/bot{bot_token}/sendMessage',
+                                                json={'chat_id': chat_id, 'text': message},
+                                            )
+                                            # Telegram often returns a useful JSON description (for example
+                                            # "chat not found", "bot was blocked", or "not enough rights").
+                                            # Preserve that diagnostic without ever logging the bot token.
+                                            try:
+                                                telegram_result = resp.json()
+                                            except Exception:
+                                                telegram_result = {}
+                                            if resp.is_error:
+                                                description = str(telegram_result.get('description') or resp.text or 'No response body')
+                                                description = re.sub(r'\s+', ' ', description).strip()[:240]
+                                                status_code = resp.status_code
+                                                recipient_hint = ('…' + chat_id[-4:]) if len(chat_id) > 4 else '[masked]'
+                                                delivered = False
+                                                print(
+                                                    'employee offline alert delivery failed:',
+                                                    f'http_status={status_code}',
+                                                    f'telegram_error={description!r}',
+                                                    f'recipient={recipient_hint}',
+                                                )
+                                            elif not telegram_result.get('ok'):
+                                                description = str(telegram_result.get('description') or 'Telegram returned ok=false')
+                                                description = re.sub(r'\s+', ' ', description).strip()[:240]
+                                                recipient_hint = ('…' + chat_id[-4:]) if len(chat_id) > 4 else '[masked]'
+                                                delivered = False
+                                                print(
+                                                    'employee offline alert delivery failed:',
+                                                    'http_status=200',
+                                                    f'telegram_error={description!r}',
+                                                    f'recipient={recipient_hint}',
+                                                )
+                                        except httpx.RequestError as exc:
+                                            delivered = False
+                                            print('employee offline alert network failure:', type(exc).__name__)
                                         except Exception as exc:
                                             delivered = False
-                                            print('employee offline alert delivery failed:', type(exc).__name__)
+                                            print('employee offline alert unexpected failure:', type(exc).__name__)
                                 if delivered:
                                     if state is None:
                                         state = EmployeeAlertState(user_id=user.id, offline_key=event_key, notified_at=datetime.now(timezone.utc))
