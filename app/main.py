@@ -1360,7 +1360,8 @@ def get_attendance_records(user_id: int | None = None, db: Session = Depends(get
     query = db.query(EmployeeAttendanceEvent, User).join(User, User.id == EmployeeAttendanceEvent.user_id).filter(EmployeeAttendanceEvent.started_at >= day_start)
     if user_id is not None: query = query.filter(EmployeeAttendanceEvent.user_id == user_id)
     rows = query.order_by(desc(EmployeeAttendanceEvent.started_at)).limit(500).all()
-    users = db.query(User).filter(User.role.in_(('employee','chatting','finding','admin'))).order_by(User.username).all()
+    users = [u for u in db.query(User).filter(User.role.in_(('employee','chatting','finding','admin'))).order_by(User.username).all()
+             if not u.username.startswith(f'deleted_{u.id}_')]
     now_utc = datetime.now(timezone.utc)
     total_count = db.query(func.count(EmployeeAttendanceEvent.id)).filter(EmployeeAttendanceEvent.started_at >= day_start).scalar() or 0
     count_query = db.query(func.count(EmployeeAttendanceEvent.id)).filter(EmployeeAttendanceEvent.started_at >= day_start)
@@ -1592,7 +1593,8 @@ def stats(db:Session=Depends(get_db), actor:User=Depends(admin)):
     today_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
     employee_roles = ('employee', 'chatting', 'finding')
     visible_roles = employee_roles + (('admin',) if actor.role == 'superadmin' else ())
-    users = db.query(User).filter(User.role.in_(visible_roles)).order_by(User.role, User.username).all()
+    users = [u for u in db.query(User).filter(User.role.in_(visible_roles)).order_by(User.role, User.username).all()
+             if not u.username.startswith(f'deleted_{u.id}_')]
     user_ids = [u.id for u in users]
     usernames = [u.username for u in users]
 
@@ -1617,6 +1619,15 @@ def stats(db:Session=Depends(get_db), actor:User=Depends(admin)):
         stamp = assigned_at if assigned_at and assigned_at.tzinfo else (assigned_at.replace(tzinfo=timezone.utc) if assigned_at else None)
         if stamp and stamp >= today_start:
             today_received_by_user[uid] = today_received_by_user.get(uid, 0) + 1
+
+    attendance_by_user = {}
+    attendance_rows = (db.query(EmployeeAttendanceEvent.user_id, EmployeeAttendanceEvent.break_type,
+                                func.count(EmployeeAttendanceEvent.id))
+                      .filter(EmployeeAttendanceEvent.user_id.in_(user_ids),
+                              EmployeeAttendanceEvent.started_at >= today_start)
+                      .group_by(EmployeeAttendanceEvent.user_id, EmployeeAttendanceEvent.break_type).all()) if user_ids else []
+    for attendance_user_id, break_type, count in attendance_rows:
+        attendance_by_user.setdefault(attendance_user_id, {})[break_type] = int(count)
 
     sent_by_user = dict(db.query(Message.sender_label, func.count(Message.id))
                         .filter(Message.sender_label.in_(usernames), Message.direction == 'out',
@@ -1677,18 +1688,23 @@ def stats(db:Session=Depends(get_db), actor:User=Depends(admin)):
             'online_seconds': online_seconds, 'offline_seconds': offline_seconds, 'on_break': on_break, 'break_type': active_break.break_type if active_break else '',
             'today_received_members': today_received_by_user.get(u.id, 0), 'today_member_messages': today_inbound,
             'today_sent_messages': sent_by_user.get(u.username, 0), 'assigned_members': len(assigned_customer_ids),
+            'active_conversations': len(assigned_customer_ids), 'online_members': int(online),
+            'today_attendance_count': sum(attendance_by_user.get(u.id, {}).values()),
+            'today_attendance_types': {name: attendance_by_user.get(u.id, {}).get(name, 0)
+                                       for name in ('Eat', 'Smoking', 'Pee', 'Tolied', 'Other')},
             'created_at': utc_iso(u.created_at), 'created_by': creator.username if creator else 'System',
             'last_operator': operator.username if operator else (creator.username if creator else 'System'),
             'last_operation': last_op.action if last_op else 'user.create'
         })
-    active_assignments = db.query(func.count(func.distinct(Assignment.customer_id))).filter(Assignment.active.is_(True)).scalar() or 0
+    active_assignments = db.query(func.count(func.distinct(Assignment.customer_id))).filter(Assignment.active.is_(True), Assignment.user_id.in_(user_ids)).scalar() or 0
     online_count = sum(1 for item in staff if item['online'])
-    today_new = db.query(func.count(Assignment.id)).filter(Assignment.assigned_at >= today_start).scalar() or 0
+    today_new = db.query(func.count(Assignment.id)).filter(Assignment.assigned_at >= today_start, Assignment.user_id.in_(user_ids)).scalar() or 0
     today_messages = db.query(func.count(Message.id)).filter(Message.sent_at >= today_start).scalar() or 0
     return {
         'employees': len(users), 'online_last_5m': online_count, 'online_members': online_count,
         'active_conversations': active_assignments, 'today_received': today_new,
         'today_messages': today_messages, 'telegram_accounts': db.query(func.count(TgAccount.id)).filter(TgAccount.status != 'deleted').scalar() or 0,
+        'telegram_accounts_connected': db.query(func.count(TgAccount.id)).filter(TgAccount.status == 'connected').scalar() or 0,
         'today_attendance_count': db.query(func.count(EmployeeAttendanceEvent.id)).filter(EmployeeAttendanceEvent.started_at >= today_start).scalar() or 0,
         'staff': staff
     }

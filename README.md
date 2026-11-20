@@ -240,3 +240,7 @@ Keep the existing `ATTENDANCE_INGEST_SECRET` unchanged for this deployment if it
 
 ## v7.7.6 hotfix
 See `PATCH_NOTES_v7.7.6.md`. Startup restores Telegram personal-account connections without automatically downloading every dialog avatar/history. Telegram clients disconnect gracefully on service shutdown. Manual admin sync remains available.
+
+
+## v7.8.0 admin dashboard reporting update
+See `PATCH_NOTES_v7.8.0.md`. Adds connected Telegram account count and employee-specific work/attendance KPIs, removes the stray literal `\\n` in Business Label UI, and hides soft-deleted employee accounts from active admin lists without deleting historical records. No schema migration or Railway variable changes are required.
