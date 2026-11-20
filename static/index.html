@@ -458,7 +458,7 @@ async function loadAdmin(){
  }
  if(data['Telegram 连接账号']){
   const jump=$('telegram-account-jump');if(jump){const oldJump=jump.value;jump.innerHTML='<option value="">快速选择 Telegram 账号</option>'+data['Telegram 连接账号'].map(a=>`<option value="${a.id}">${esc(a.label)} · #${a.id}</option>`).join('');if(oldJump)jump.value=oldJump;}
-  $('accounts').innerHTML=data['Telegram 连接账号'].map(a=>`<div class="account-card" data-owner-id="${a.assigned_user_id||''}" id="tg-account-card-${a.id}"><b>Telegram Account #${a.id}</b><div class="meta">Assigned employee: <b>${esc(a.assigned_username||'Unassigned')}</b></div><div class="telegram-account-profile"><img id="tg-account-avatar-${a.id}" src="/static/logos/telegram.svg" alt="Telegram account avatar"><div class="profile-lines"><b id="tg-account-name-${a.id}">${esc(a.label)}</b><div class="meta" id="tg-account-details-${a.id}">Phone: ${esc(a.phone_masked)} · Loading Telegram profile…</div></div></div><div class="meta">Status: <span class="account-status ${a.status==='connected'?'':'offline'}">${esc(a.status)}</span><br>Synced customers: ${a.customer_count??0}<br>Connected: ${formatMyanmar(a.created_at)}</div><div class="account-actions">${hasPermission('telegram.sync')?`<button onclick="syncTelegramAccount(${a.id},this)">Sync all chats</button>`:''}${['telegram.connect','telegram.sync'].some(hasPermission)?`<button class="secondary" onclick="loadTelegramAccountProfile(${a.id})">Refresh profile</button>`:''}</div></div>`).join('')||'<p class="muted">No Telegram personal account connected</p>';
+  $('accounts').innerHTML=data['Telegram 连接账号'].map(a=>`<div class="account-card" data-owner-id="${a.assigned_user_id||''}" id="tg-account-card-${a.id}"><b>Telegram Account #${a.id}</b><div class="meta">Assigned employee: <b>${esc(a.assigned_username||'Unassigned')}</b></div><div class="telegram-account-profile"><img id="tg-account-avatar-${a.id}" src="/static/logos/telegram.svg" alt="Telegram account avatar"><div class="profile-lines"><b id="tg-account-name-${a.id}">${esc(a.label)}</b><div class="meta" id="tg-account-details-${a.id}">Phone: ${esc(a.phone_masked)} · Loading Telegram profile…</div></div></div><div class="meta">Status: <span class="account-status ${a.status==='connected'?'':'offline'}">${esc(a.status)}</span><br>Synced customers: ${a.customer_count??0}<br>Connected: ${formatMyanmar(a.created_at)}</div><div class="account-actions">${hasPermission('telegram.sync')?`<button onclick="syncTelegramAccount(${a.id},this)">Sync all chats</button>`:''}${['telegram.connect','telegram.sync'].some(hasPermission)?`<button class="secondary" onclick="loadTelegramAccountProfile(${a.id})">Refresh profile</button>`:''}${me?.role==='superadmin'?`<button class="secondary" onclick="disconnectTelegramAccount(${a.id},this)">取消连接</button>`:''}</div></div>`).join('')||'<p class="muted">No Telegram personal account connected</p>';
   filterTelegramAccountsByOwner($('telegram-owner-filter')?.value||'');
   const selectedAccount=data['Telegram 连接账号'].find(a=>String(a.id)===String($('telegram-account-jump')?.value||''));
   if(selectedAccount&&$('telegram-owner-select'))$('telegram-owner-select').value=selectedAccount.assigned_user_id?String(selectedAccount.assigned_user_id):'';
@@ -571,6 +571,17 @@ async function loadTelegramAccountProfile(id){
  }catch(e){
   const el=$('tg-account-details-'+id);if(el)el.textContent='Telegram profile unavailable: '+e.message;
  }
+}
+async function disconnectTelegramAccount(id,button){
+ if(!window.confirm(`确定取消 Telegram Account #${id} 的连接吗？\n\n此操作只停止该账号的 Telegram 客户端并标记为 disconnected。加密 Session、客户资料、头像文件及聊天记录都会保留，不会删除其他账号。`))return;
+ const oldText=button?.textContent;
+ if(button){button.disabled=true;button.textContent='处理中…'}
+ try{
+  await api('/admin/telegram/accounts/'+id+'/disconnect',{method:'POST'});
+  showModal('已取消 Telegram 连接',`Account #${id} 已停止连接。原有加密 Session 和客户/聊天历史记录均已保留；其他 Telegram 账号不受影响。`);
+  loadAdmin().catch(err=>console.warn('Background admin refresh failed:',err));
+ }catch(e){showModal('取消连接失败',e.message,true)}
+ finally{if(button){button.disabled=false;button.textContent=oldText||'取消连接'}}
 }
 async function syncTelegramAccount(id,button){
  const oldText=button?.textContent;

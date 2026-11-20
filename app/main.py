@@ -775,6 +775,29 @@ def telegram_accounts(db:Session=Depends(get_db), actor:User=Depends(admin)):
              'assigned_username':owners[a.assigned_user_id].username if a.assigned_user_id in owners else None}
             for a in rows]
 
+@app.post('/api/admin/telegram/accounts/{account_id}/disconnect')
+async def admin_disconnect_telegram_account(account_id: int, db: Session = Depends(get_db), actor: User = Depends(admin)):
+    """Stop one Telegram client without deleting its encrypted session or CRM history."""
+    if actor.role != 'superadmin':
+        raise HTTPException(403, 'Super administrator only')
+    account = db.get(TgAccount, account_id)
+    if not account:
+        raise HTTPException(404, 'Telegram account not found')
+    client = tg._clients.pop(account_id, None)
+    if client:
+        try:
+            if client.is_connected():
+                await client.disconnect()
+        except Exception as exc:
+            # Do not erase the saved session or customer data if network shutdown fails.
+            print('telegram account disconnect:', account_id, repr(exc))
+    account.status = 'disconnected'
+    db.commit()
+    audit(db, actor, 'telegram.account.disconnect', 'telegram_account', account_id,
+          'Encrypted session and customer/message history retained')
+    return {'ok': True, 'account_id': account_id, 'status': account.status,
+            'session_retained': True, 'history_retained': True}
+
 @app.put('/api/admin/telegram/accounts/{account_id}/owner')
 def set_telegram_account_owner(account_id: int, data: dict, db: Session = Depends(get_db), actor: User = Depends(admin)):
     require_permission(actor, 'telegram.connect')
