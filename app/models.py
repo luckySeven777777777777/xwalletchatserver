@@ -182,3 +182,13 @@ class EmployeeAttendanceEvent(Base):
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
     returned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     duration_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+class AttendanceIngestReceipt(Base):
+    """Deduplicate Bot A retries so one Telegram action creates one attendance event."""
+    __tablename__ = 'attendance_ingest_receipts'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    event_id: Mapped[str] = mapped_column(String(80), unique=True, index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    action: Mapped[str] = mapped_column(String(16))
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)

@@ -1,4 +1,4 @@
-import asyncio, re, secrets, os, uuid, mimetypes, base64, hmac, json
+import asyncio, re, secrets, os, uuid, mimetypes, base64, hmac, json, time, threading
 from datetime import datetime, timezone, timedelta
 from fastapi import FastAPI, Depends, HTTPException, Header, UploadFile, File, Form, Request
 from fastapi.responses import FileResponse, Response
@@ -9,13 +9,14 @@ from sqlalchemy.orm import Session
 from sqlalchemy import desc, text, func, inspect
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from .db import Base, engine, get_db, SessionLocal
-from .models import User, Team, TgAccount, Customer, Assignment, Message, Tag, AuditLog, ReadState, PresenceSession, EmployeeAlertConfig, EmployeeAlertState, InboxNotification, AttendanceBotConfig, EmployeeTelegramIdentity, EmployeeBreakState, EmployeeAttendanceEvent
+from .models import User, Team, TgAccount, Customer, Assignment, Message, Tag, AuditLog, ReadState, PresenceSession, EmployeeAlertConfig, EmployeeAlertState, InboxNotification, AttendanceBotConfig, EmployeeTelegramIdentity, EmployeeBreakState, EmployeeAttendanceEvent, AttendanceIngestReceipt
 from .security import hash_password, verify_password, create_token, decode_token, create_2fa_challenge, encrypt_session, decrypt_session
 from .config import settings
 from . import telegram_service as tg
 import pyotp, qrcode
 from io import BytesIO
 from zoneinfo import ZoneInfo
+from urllib.parse import urlsplit
 
 Base.metadata.create_all(bind=engine)
 
@@ -143,15 +144,80 @@ with SessionLocal() as _migration_db:
         _user.public_id = make_public_user_id(_migration_db)
     _migration_db.commit()
 
-app = FastAPI(title='X-Wallet Chat Management', version='7.7.3')
+app = FastAPI(title='X-Wallet Chat Management', version='7.7.5')
 # Memory cache prevents connected-account avatar refresh from failing on a full Railway volume.
 _TELEGRAM_ACCOUNT_AVATAR_CACHE: dict[int, bytes] = {}
-app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins.split(','), allow_credentials=False, allow_methods=['*'], allow_headers=['*'])
+# Restrict cross-origin browser access. Same-origin requests need no CORS entry.
+_configured_origins = [item.strip().rstrip('/') for item in settings.cors_origins.split(',') if item.strip()]
+if '*' in _configured_origins:
+    _configured_origins = []
+if not _configured_origins:
+    _app_parts = urlsplit(settings.app_base_url)
+    if _app_parts.scheme and _app_parts.netloc:
+        _configured_origins = [f'{_app_parts.scheme}://{_app_parts.netloc}']
+if _configured_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_configured_origins,
+        allow_credentials=False,
+        allow_methods=['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+        allow_headers=['Authorization', 'Content-Type', 'X-Attendance-Secret', 'X-Session-Key'],
+        max_age=600,
+    )
+
+@app.middleware('http')
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers.setdefault('X-Content-Type-Options', 'nosniff')
+    response.headers.setdefault('X-Frame-Options', 'DENY')
+    response.headers.setdefault('Referrer-Policy', 'strict-origin-when-cross-origin')
+    response.headers.setdefault('Permissions-Policy', 'camera=(), microphone=(), geolocation=()')
+    if request.url.scheme == 'https' or request.headers.get('x-forwarded-proto') == 'https':
+        response.headers.setdefault('Strict-Transport-Security', 'max-age=31536000; includeSubDomains')
+    if request.url.path.startswith('/api/'):
+        response.headers.setdefault('Cache-Control', 'no-store')
+    return response
+
 app.mount('/static', StaticFiles(directory='static'), name='static')
 
-class LoginIn(BaseModel): username: str; password: str
-class TwoFactorVerifyIn(BaseModel): challenge_token: str; code: str
-class TwoFactorCodeIn(BaseModel): code: str
+# Process-local login throttle. Keep Railway at one web replica unless a shared
+# Redis/database limiter is configured.
+_AUTH_FAILURES: dict[str, list[float]] = {}
+_AUTH_LOCK = threading.Lock()
+_AUTH_WINDOW_SECONDS = 15 * 60
+_AUTH_MAX_FAILURES = 5
+
+def _auth_bucket(request: Request, username: str) -> str:
+    ip = request.client.host if request.client else 'unknown'
+    return f'{ip}|{(username or "").strip().lower()[:80]}'
+
+def _prune_auth_failures(key: str) -> list[float]:
+    now_mono = time.monotonic()
+    attempts = [stamp for stamp in _AUTH_FAILURES.get(key, []) if now_mono - stamp < _AUTH_WINDOW_SECONDS]
+    _AUTH_FAILURES[key] = attempts
+    return attempts
+
+def _check_auth_limit(key: str):
+    with _AUTH_LOCK:
+        attempts = _prune_auth_failures(key)
+        if len(attempts) >= _AUTH_MAX_FAILURES:
+            retry_after = max(1, int(_AUTH_WINDOW_SECONDS - (time.monotonic() - attempts[0])))
+            raise HTTPException(429, 'Too many failed sign-in attempts. Please wait 15 minutes and try again.',
+                                headers={'Retry-After': str(retry_after)})
+
+def _record_auth_failure(key: str):
+    with _AUTH_LOCK:
+        attempts = _prune_auth_failures(key)
+        attempts.append(time.monotonic())
+        _AUTH_FAILURES[key] = attempts
+
+def _clear_auth_failures(key: str):
+    with _AUTH_LOCK:
+        _AUTH_FAILURES.pop(key, None)
+
+class LoginIn(BaseModel): username: str = Field(min_length=1, max_length=80); password: str = Field(min_length=1, max_length=128)
+class TwoFactorVerifyIn(BaseModel): challenge_token: str = Field(min_length=20, max_length=4096); code: str = Field(min_length=6, max_length=8)
+class TwoFactorCodeIn(BaseModel): code: str = Field(min_length=6, max_length=8)
 class ForwardIn(BaseModel): target_customer_id: int
 class UserIn(BaseModel): username: str; password: str = Field(min_length=10); role: str = 'chatting'; team_id: int | None = None; auto_team: bool = True; permissions: list[str] = Field(default_factory=list)
 class UserPermissionsIn(BaseModel): permissions: list[str] = Field(default_factory=list)
@@ -270,6 +336,8 @@ def login(data: LoginIn, request: Request, db: Session = Depends(get_db)):
     # Employee links may preserve mixed-case usernames. Resolve usernames
     # case-insensitively and trim only the username (never the password).
     submitted_username = data.username.strip()
+    auth_key = _auth_bucket(request, submitted_username)
+    _check_auth_limit(auth_key)
     user = db.query(User).filter(func.lower(User.username) == submitted_username.lower()).first()
 
     # Recovery path for the environment-configured bootstrap super administrator.
@@ -294,8 +362,8 @@ def login(data: LoginIn, request: Request, db: Session = Depends(get_db)):
             # diagnostic instead of silently treating a corrupt hash as a typo.
             print(f"auth password verification error for user_id={user.id}: {type(exc).__name__}: {exc}")
     if not user or not user.active or not password_ok:
-        reason = 'user_not_found' if user is None else ('account_inactive' if not user.active else 'password_mismatch')
-        print(f"auth rejected: username={submitted_username!r}; reason={reason}")
+        _record_auth_failure(auth_key)
+        print("auth rejected: invalid credentials or inactive account")
         # If the bootstrap credential is valid but its database hash was changed,
         # restore only this configured superadmin's password hash.
         if configured_admin:
@@ -304,6 +372,7 @@ def login(data: LoginIn, request: Request, db: Session = Depends(get_db)):
             db.commit()
         else:
             raise HTTPException(401, 'Invalid username or password. Ask an administrator to verify the account is active and reset its password if needed.')
+    _clear_auth_failures(auth_key)
     if user.totp_enabled:
         return {'requires_2fa': True, 'challenge_token': create_2fa_challenge(user.id), 'username': user.username}
     session_key = request.headers.get('x-session-key') or secrets.token_urlsafe(24)
@@ -319,8 +388,12 @@ def verify_login_2fa(data: TwoFactorVerifyIn, request: Request, db: Session = De
     user = db.get(User, int(payload['sub']))
     if not user or not user.active or not user.totp_enabled or not user.totp_secret:
         raise HTTPException(401, 'Two-factor account is unavailable.')
+    auth_key = _auth_bucket(request, user.username)
+    _check_auth_limit(auth_key)
     if not pyotp.TOTP(decrypt_session(user.totp_secret)).verify(data.code.strip(), valid_window=1):
+        _record_auth_failure(auth_key)
         raise HTTPException(401, 'Invalid 2FA code. Check the code and try again.')
+    _clear_auth_failures(auth_key)
     session_key = request.headers.get('x-session-key') or secrets.token_urlsafe(24)
     touch_presence(db, user, session_key, login=True)
     audit(db, user, 'auth.login_2fa', 'user', user.id, f'role={user.role}')
@@ -1203,69 +1276,133 @@ def get_attendance_records(user_id: int | None = None, db: Session = Depends(get
     return {'today_count': total_count, 'filtered_count': count_query.scalar() or 0, 'type_counts': type_counts, 'employees': [{'id':u.id,'username':u.username} for u in users], 'records': [{'id':e.id,'user_id':u.id,'username':u.username,'break_type':e.break_type,'started_at':utc_iso(e.started_at),'returned_at':utc_iso(e.returned_at),'duration_seconds':(e.duration_seconds if e.duration_seconds is not None else max(0, int((now_utc - (e.started_at if e.started_at.tzinfo else e.started_at.replace(tzinfo=timezone.utc))).total_seconds())))} for e,u in rows]}
 
 class AttendanceIngestIn(BaseModel):
-    action: str  # break | return
-    telegram_user_id: str
-    group_chat_id: str = ''
-    break_type: str = 'Other'
-    event_at: str = ''
+    action: str = Field(min_length=1, max_length=16)
+    telegram_user_id: str = Field(min_length=3, max_length=20)
+    group_chat_id: str = Field(min_length=3, max_length=20)
+    break_type: str = Field(default='Other', max_length=20)
+    event_at: str = Field(default='', max_length=64)
+    event_id: str = Field(default='', max_length=80)
+
+def _parse_attendance_event_time(value: str, now_utc: datetime | None = None) -> datetime:
+    now_utc = now_utc or datetime.now(timezone.utc)
+    if not value:
+        return now_utc
+    try:
+        parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+    except ValueError:
+        raise HTTPException(400, 'event_at must be an ISO-8601 timestamp.')
+    event_time = parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
+    age_seconds = (now_utc - event_time).total_seconds()
+    if age_seconds < -300 or age_seconds > 7 * 24 * 60 * 60:
+        raise HTTPException(400, 'event_at is outside the accepted time window.')
+    return event_time
+
+def _validate_attendance_group_id(expected: str, supplied: str):
+    expected = (expected or '').strip()
+    supplied = (supplied or '').strip()
+    if not expected:
+        raise HTTPException(503, 'Attendance group ID is not configured in the admin dashboard.')
+    if not supplied or not hmac.compare_digest(expected, supplied):
+        raise HTTPException(403, 'Unexpected or missing attendance group ID.')
+
+
+def _normalize_break_type(value: str) -> str:
+    aliases = {
+        'eat':'Eat', 'eating':'Eat', 'smoking':'Smoking', 'pee':'Pee',
+        'toilet':'Tolied', 'toliet':'Tolied', 'tolied':'Tolied', 'other':'Other'
+    }
+    normalized = aliases.get((value or 'Other').strip().lower())
+    if not normalized:
+        raise HTTPException(400, 'break_type must be Eat, Smoking, Pee, Tolied, or Other.')
+    return normalized
 
 @app.post('/api/integrations/attendance/events')
 def ingest_attendance_event(data: AttendanceIngestIn, x_attendance_secret: str = Header(default=''), db: Session = Depends(get_db)):
-    """Receive events pushed by the separately hosted employee check-in Bot A.
+    """Receive authenticated, idempotent events from the separate Bot A service.
 
-    This endpoint deliberately does not poll Telegram and never calls getUpdates.
+    This service never polls Telegram and never calls getUpdates.
     """
     secret = settings.attendance_ingest_secret
-    if not secret:
-        raise HTTPException(503, 'Attendance event integration is not configured.')
+    if not secret or len(secret) < 32:
+        raise HTTPException(503, 'Attendance event integration is not securely configured.')
     if not hmac.compare_digest(x_attendance_secret or '', secret):
         raise HTTPException(401, 'Invalid attendance integration secret.')
+
     cfg = db.get(AttendanceBotConfig, 1)
     if not cfg or not cfg.enabled:
         raise HTTPException(409, 'Attendance integration is disabled in the admin dashboard.')
-    if cfg.group_chat_id and data.group_chat_id and str(cfg.group_chat_id) != str(data.group_chat_id):
-        raise HTTPException(403, 'Unexpected attendance group ID.')
-    identity = db.query(EmployeeTelegramIdentity).filter_by(telegram_user_id=str(data.telegram_user_id).strip()).first()
+    _validate_attendance_group_id(cfg.group_chat_id, data.group_chat_id)
+
+    action = data.action.strip().lower()
+    if action not in ('break', 'start', 'out', 'return', 'back', 'in'):
+        raise HTTPException(400, 'action must be break or return.')
+    telegram_user_id = data.telegram_user_id.strip()
+    if not re.fullmatch(r'\d{3,20}', telegram_user_id):
+        raise HTTPException(400, 'telegram_user_id must be numeric.')
+    event_id = data.event_id.strip()
+    if event_id and not re.fullmatch(r'[A-Za-z0-9._:-]{8,80}', event_id):
+        raise HTTPException(400, 'event_id has an invalid format.')
+
+    if event_id:
+        previous = db.query(AttendanceIngestReceipt).filter_by(event_id=event_id).first()
+        if previous:
+            return {'ok': True, 'duplicate': True, 'employee_id': previous.user_id}
+
+    identity = db.query(EmployeeTelegramIdentity).filter_by(telegram_user_id=telegram_user_id).first()
     if not identity:
         raise HTTPException(404, 'Telegram user ID is not mapped to an employee.')
     employee = db.get(User, identity.user_id)
-    if not employee or not employee.active:
+    if not employee or not employee.active or employee.role not in ('employee', 'chatting', 'finding', 'admin'):
         raise HTTPException(404, 'Mapped employee is not active.')
+
     now_utc = datetime.now(timezone.utc)
-    event_time = now_utc
-    if data.event_at:
-        try:
-            parsed = datetime.fromisoformat(data.event_at.replace('Z', '+00:00'))
-            event_time = parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
-        except ValueError:
-            raise HTTPException(400, 'event_at must be an ISO-8601 timestamp.')
-    action = data.action.strip().lower()
+    event_time = _parse_attendance_event_time(data.event_at, now_utc)
     state = db.get(EmployeeBreakState, employee.id)
     if state is None:
         state = EmployeeBreakState(user_id=employee.id)
         db.add(state)
+
     if action in ('break', 'start', 'out'):
         if state.break_started_at is None:
-            reason_aliases = {'eat':'Eat','eating':'Eat','smoking':'Smoking','pee':'Pee','toilet':'Tolied','toliet':'Tolied','tolied':'Tolied','other':'Other'}
-            reason = reason_aliases.get((data.break_type or 'Other').strip().lower(), 'Other')
+            reason = _normalize_break_type(data.break_type)
             state.break_started_at = event_time
             state.last_action = 'break'
             db.add(EmployeeAttendanceEvent(user_id=employee.id, break_type=reason, started_at=event_time))
-    elif action in ('return', 'back', 'in'):
+        else:
+            return {'ok': True, 'duplicate': True, 'employee': employee.username, 'action': 'break'}
+    else:
         if state.break_started_at is not None:
             started = state.break_started_at
-            if started.tzinfo is None: started = started.replace(tzinfo=timezone.utc)
-            event = db.query(EmployeeAttendanceEvent).filter(EmployeeAttendanceEvent.user_id == employee.id, EmployeeAttendanceEvent.returned_at.is_(None)).order_by(desc(EmployeeAttendanceEvent.started_at)).first()
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=timezone.utc)
+            event = (db.query(EmployeeAttendanceEvent)
+                     .filter(EmployeeAttendanceEvent.user_id == employee.id,
+                             EmployeeAttendanceEvent.returned_at.is_(None))
+                     .order_by(desc(EmployeeAttendanceEvent.started_at)).first())
             if event:
                 event.returned_at = event_time
                 event.duration_seconds = max(0, int((event_time - started).total_seconds()))
         state.break_started_at = None
         state.last_return_at = event_time
         state.last_action = 'back'
-    else:
-        raise HTTPException(400, 'action must be break or return.')
-    db.commit()
-    return {'ok': True, 'employee': employee.username, 'action': action, 'recorded_at': utc_iso(event_time)}
+
+    if event_id:
+        db.add(AttendanceIngestReceipt(event_id=event_id, user_id=employee.id, action=action))
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        if event_id and db.query(AttendanceIngestReceipt).filter_by(event_id=event_id).first():
+            return {'ok': True, 'duplicate': True, 'employee_id': employee.id}
+        raise
+    return {'ok': True, 'duplicate': False, 'employee': employee.username, 'action': action, 'recorded_at': utc_iso(event_time)}
+
+def _offline_alert_due(offline_since: datetime, now_utc: datetime | None = None, threshold_seconds: int = 900) -> bool:
+    now_utc = now_utc or datetime.now(timezone.utc)
+    if offline_since.tzinfo is None:
+        offline_since = offline_since.replace(tzinfo=timezone.utc)
+    return (now_utc - offline_since).total_seconds() >= threshold_seconds
+
 
 async def employee_offline_alert_loop():
     """Poll presence and send one Telegram alert per offline episode during Myanmar night hours."""
@@ -1309,8 +1446,9 @@ async def employee_offline_alert_loop():
                                     returned = break_state.last_return_at
                                     if returned.tzinfo is None: returned = returned.replace(tzinfo=timezone.utc)
                                     offline_since = max(offline_since, returned)
-                                elapsed = (datetime.now(timezone.utc) - offline_since).total_seconds()
-                                if elapsed < 900:
+                                check_now_utc = datetime.now(timezone.utc)
+                                elapsed = (check_now_utc - offline_since).total_seconds()
+                                if not _offline_alert_due(offline_since, check_now_utc, 900):
                                     continue
                                 event_key = offline_since.astimezone(timezone.utc).isoformat(timespec='seconds')
                                 if state and state.offline_key == event_key and state.notified_at:
@@ -1329,7 +1467,7 @@ async def employee_offline_alert_loop():
                                             if not resp.json().get('ok'): delivered = False
                                         except Exception as exc:
                                             delivered = False
-                                            print('employee offline alert delivery failed:', repr(exc))
+                                            print('employee offline alert delivery failed:', type(exc).__name__)
                                 if delivered:
                                     if state is None:
                                         state = EmployeeAlertState(user_id=user.id, offline_key=event_key, notified_at=datetime.now(timezone.utc))
@@ -1479,12 +1617,18 @@ def diagnostics(db: Session = Depends(get_db), actor: User = Depends(admin)):
     except Exception as exc:
         database_status = f'error: {type(exc).__name__}'
     accounts = db.query(TgAccount).all() if database_status == 'connected' else []
+    active_superadmins = db.query(User).filter(User.role == 'superadmin', User.active.is_(True)).all() if database_status == 'connected' else []
     return {
         'database': database_status,
         'database_dialect': engine.dialect.name,
         'database_url_configured': bool(os.getenv('DATABASE_URL')),
         'telegram_api_configured': bool(settings.telegram_api_id and settings.telegram_api_hash),
         'session_encryption_configured': bool(settings.session_encryption_key),
+        'jwt_secret_configured': bool(os.getenv('JWT_SECRET') and len(settings.jwt_secret) >= 32),
+        'attendance_ingest_configured': bool(settings.attendance_ingest_secret and len(settings.attendance_ingest_secret) >= 32),
+        'cors_origins_configured': bool(_configured_origins),
+        'active_superadmins_2fa_enabled': bool(active_superadmins) and all(u.totp_enabled for u in active_superadmins),
+        'active_superadmins_total': len(active_superadmins),
         'telegram_accounts_total': len(accounts),
         'telegram_accounts_connected': len([a for a in accounts if a.status == 'connected']),
     }

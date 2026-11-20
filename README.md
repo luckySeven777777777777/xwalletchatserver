@@ -1,4 +1,4 @@
-## Current release: v7.7.3
+## Current release: v7.7.5
 
 See `PATCH_NOTES_v7.7.1.md` for fast admin action behavior and Telegram employee offline notifications.
 
@@ -230,3 +230,9 @@ See `PATCH_NOTES_v7.7.3.md` for removal of the Google Translate sidebar, the 3-c
 ## v7.7.4 attendance integration (separate Bot A Railway service)
 
 The X-WALLET management service no longer polls the employee attendance bot. It never calls `getUpdates` for Bot A. Keep Bot A running in its current Railway service and push parsed `/break` and `/back` events to `POST /api/integrations/attendance/events` using the shared `ATTENDANCE_INGEST_SECRET` header. See `PATCH_NOTES_v7.7.4.md` for the exact Python helper and Railway variables. The Employee Attendance · Today panel now includes separate daily count cards for Eat, Smoking, Pee, Tolied, and Other.
+
+
+## v7.7.5 security and reliability update
+See `PATCH_NOTES_v7.7.5.md`. This release requires a unique `JWT_SECRET` (at least 32 characters) in Railway Variables. It narrows CORS to the configured application origin, adds security headers and API no-store caching, throttles repeated login/2FA failures, validates the configured attendance group strictly, and deduplicates Bot A event retries with persistent database receipts. Bot A adds event IDs and retries transient HTTP failures without starting another Telegram polling process.
+
+Keep the existing `ATTENDANCE_INGEST_SECRET` unchanged for this deployment if it is already configured and at least 32 characters. Keep `SESSION_ENCRYPTION_KEY` unchanged. Do not change Bot A's `BOT_TOKEN`, `GROUP_CHAT_ID`, or polling settings. The login throttle is process-local; run one management web replica unless a shared rate-limit store is added.
