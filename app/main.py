@@ -968,7 +968,11 @@ def inbox(filter:str='all', db:Session=Depends(get_db), user:User=Depends(curren
             unread=db.query(Message).filter(Message.customer_id==c.id,Message.direction=='in',Message.id>last_read).count()
         if filter=='unread' and unread==0: continue
         if filter=='unreplied' and (not last or last.direction!='in'): continue
-        result.append({**safe_customer(c,user),'last_message':redact(last.body)[:180] if last else '', 'last_message_at':last.sent_at.isoformat() if last else None,'unread':unread,'account_id':c.account_id})
+        business_tag = db.query(Tag).filter_by(customer_id=c.id, key='Business Label', scope='shared').first()
+        result.append({**safe_customer(c,user),'business_label':business_tag.value if business_tag else '',
+                       'last_message':redact(last.body)[:180] if last else '',
+                       'last_message_at':last.sent_at.isoformat() if last else None,
+                       'unread':unread,'account_id':c.account_id})
     return sorted(result,key=lambda x:x['last_message_at'] or '',reverse=True)
 
 @app.get('/api/customers/{cid}/messages')
@@ -1158,6 +1162,10 @@ def upsert_tag(cid:int,data:TagIn, db:Session=Depends(get_db), user:User=Depends
     c=db.get(Customer,cid)
     if not c or not can_access(db,user,cid): raise HTTPException(404,'Customer not found')
     if data.scope not in ('private','team','shared'): raise HTTPException(400,'scope must be private, team, or shared')
+    if data.key.strip() == 'Business Label' and user.role not in ('admin', 'superadmin'):
+        raise HTTPException(403, 'Only an administrator can change the Business Label.')
+    if data.key.strip() == 'Business Label' and len(data.value.strip()) > 80:
+        raise HTTPException(400, 'Business Label must be 80 characters or fewer.')
     if data.scope=='team' and not user.team_id and user.role not in ('admin','superadmin'): raise HTTPException(400,'Join a team before creating team tags')
     if data.scope=='shared' and user.role not in ('admin','superadmin'): owner=None
     elif user.role in ('admin','superadmin') and data.scope=='private': owner=None
